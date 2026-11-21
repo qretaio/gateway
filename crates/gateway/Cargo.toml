@@ -3,7 +3,7 @@ name = "gateway"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The gateway (the former edge): the outermost serving face for every application the fleet runs. TLS, host routing (the table rides the kapi watch), the edge cache before any backend, forwarding to the fleet over HTTP. Moved into the kapi workspace 2026-11-16 — the `kapi gateway` subcommand runs it standalone, `--with-gateway` runs it in-process; the pure laws live in gateway-core, the OCI pull grammar in this crate's `oci` module (merged from gateway-oci the same day). The lint table below is the crate's own (converging onto the workspace wall is a later slice; the moved code keeps its posture)."
+description = "The gateway: host routing, edge cache, coalesced forwards, and the optional CRI deploy arm."
 
 [dependencies]
 # The typed Gateway API — the gateway builds on HttpRoute CRDs: it reads
@@ -13,13 +13,6 @@ kube = { version = "5", default-features = false, features = ["client", "config"
 # The pure laws (route matcher, asset law + its AssetSpec, cache store,
 # trim) — one home, THIS workspace.
 gateway-core = { path = "../gateway-core" }
-# The spawn arm's home (owner directive 2026-11-16: the gateway's
-# controller belongs with the k8s controllers) — composed here unchanged.
-# The deploy arm's seam lives in the kapi workspace (the sibling checkout).
-controller = { path = "../../../kapi/crates/controller" }
-# The deploy arm (EDGE-FR-017): the real CRI client + supervisor,
-# configured from the node's native CRI-O / RuntimeClass files.
-cri-client = { path = "../../../kapi/crates/cri-client" }
 # The drain discipline: the trigger latches, stop-accept happens
 # structurally before the barrier, the in-flight count is the receiver
 # count.
@@ -38,7 +31,7 @@ socket2 = { version = "0.5", features = ["all"] }
 # The self-confinement (kapi.spec EDGE-FR-15): deny-by-default policies
 # (Seatbelt/Landlock), applied restrict_self at boot. The CLI feature
 # stays off — a library consumer never builds clap.
-seatlock = { path = "../../../qretaio/seatlock", default-features = false }
+seatlock = { path = "../../vendor/seatlock", default-features = false }
 # The artifact walk extracts the tree in memory; tar/gzip decode the
 # layer; the reference/URL/digest-verify laws ride the oci module.
 oci-spec = "0.10"

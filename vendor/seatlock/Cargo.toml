@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = []
+
+[package]
+name = "seatlock"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Reusable OS-level sandbox enforcement for spawned processes: Seatbelt (macOS), Landlock (Linux)"
+readme = "README.md"
+
+[[bin]]
+name = "seatlock"
+path = "src/main.rs"
+
+[features]
+default = ["cli"]
+# Serialize a sandbox configuration: Policy/NetworkPolicy derive
+# Serialize+Deserialize, so a confinement can ride a queue or a spec file.
+serde = ["dep:serde"]
+# The sandbox-exec-shaped CLI (src/main.rs). LIBRARY CONSUMERS: build with
+# `default-features = false` — the crate itself needs nothing here; the
+# binary compiles to a stub naming the feature and clap never enters the
+# build.
+cli = ["dep:clap", "dep:serde_json", "serde"]
+
+[lints.rust]
+future_incompatible = "warn"
+nonstandard_style = "warn"
+missing_debug_implementations = "warn"
+missing_copy_implementations = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+variant_size_differences = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+all = { level = "deny", priority = -2 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+exit = "deny"
+mem_forget = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+future_not_send = "allow"
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+# CLI-only (behind the `cli` feature; libraries must not pay for these)
+clap = { version = "4", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# crates.io 0.4.7 = ABI V9 (no UDP). Pinned to main for ABI 10 (UDP);
+# revisit when a release publishes.
+landlock = { git = "https://github.com/landlock-lsm/rust-landlock", rev = "5991c08320d2" }
+# capability inspection and drops (bounding set, NO_NEW_PRIVS companions)
+caps = "0.5"
+libc = "0.2"
+
+# NOTE: crates.io 0.4.7 tops out at ABI V9 (TCP only). main carries ABI 10
+# (UDP bind/connect_send) — pinned until 0.4.8/0.5 publishes, then drop
+# back to the registry dep.
+# git = https://github.com/landlock-lsm/rust-landlock
+
+[dev-dependencies]
+tempfile = "3"

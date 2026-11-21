@@ -1,0 +1,11 @@
+[package]
+name = "fsm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "The sans-I/O harness every control machine hangs on: TOTAL on every (state, event) pair, PURE handlers, FENCED runs, the bounded refusal book, and the no-unsafe report/book wrapper the harness! macro generates. Events in, actions out, no tokio, no sockets, no clocks — the host owns every side effect and every timer."
+
+[dependencies]
+statig = "0.4"
+serde = { version = "1", features = ["derive"] }

@@ -10,7 +10,7 @@ description = "Local handover transport: unix-socket IPC with generic messages a
 # cutover module 2026-11-16): the cutover surface (RunId, Role,
 # Message, Refusal, StateMachine, harness!) is re-exported unchanged
 # for every consumer.
-fsm = { path = "../../../fsm/fsm" }
+fsm = { path = "../../vendor/fsm" }
 # The flow law: hierarchical state machines, no_std, the macro is the
 # default feature. The machines never perform I/O — statig's handlers
 # here only mutate the machine's own storage.

@@ -47,9 +47,6 @@ pub struct Gateway {
     pub informer: Informer,
     pub cache: EdgeCache,
     pub assets: crate::assets_store::AssetStore,
-    /// The deploy arm (EDGE-FR-017 stage 3): Deployment rows driven
-    /// through a CRI engine. `None` when `[deploy.cri]` is absent.
-    pub deploy: Option<Arc<cri_client::DeploySupervisor>>,
     /// The drain machinery (kapi.spec EDGE-FR-010's first land): every
     /// in-flight request holds a guard; the barrier waits them out.
     pub drain: graceful_handover::GracefulShutdown,
@@ -105,7 +102,6 @@ impl Gateway {
             .map(|k| k.url.clone())
             .unwrap_or_default();
         Self {
-            deploy: None,
             informer: Informer::new(&kapi_url),
             cache: EdgeCache::default(),
             assets: crate::assets_store::AssetStore::new(registry),
@@ -127,12 +123,6 @@ impl Gateway {
     /// Install the deploy arm (EDGE-FR-017): called by the composing
     /// process after constructing the async CRI engine, before the
     /// gateway is wrapped in an Arc and served.
-    #[must_use]
-    pub fn with_deploy(mut self, supervisor: Arc<cri_client::DeploySupervisor>) -> Self {
-        self.deploy = Some(supervisor);
-        self
-    }
-
     /// The axum app: one fallback — every path walks the pipeline.
     pub fn router(self: &Arc<Self>) -> axum::Router {
         let this = Arc::clone(self);
@@ -253,15 +243,6 @@ impl Gateway {
         let Some((resolved, addr)) = resolved else {
             return plain(404, "not found\n");
         };
-        // The deploy arm's CRI-run pods answer on their CNI IP:port —
-        // a route with no local child / stamped node still resolves
-        // when a Deployment backs it (EDGE-FR-017).
-        let addr = addr.or_else(|| {
-            self.deploy
-                .as_ref()
-                .and_then(|d| d.address(&resolved.org, &resolved.app))
-                .filter(|a| !a.is_empty())
-        });
         // A PublicAssets CR with NO httpRouteRef has no backend: a path
         // that missed public/ is a 404, not a worker forward. With a
         // route ref, the matched route's backend (addr) handles it — the
