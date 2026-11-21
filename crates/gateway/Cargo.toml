@@ -61,6 +61,8 @@ serde_json = "1"
 venndb = "0.7"
 anyhow = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+uniflight = "0.9.0"
+bytes = "1"
 
 [dev-dependencies]
 tokio-stream = "0.1"

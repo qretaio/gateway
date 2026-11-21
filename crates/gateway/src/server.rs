@@ -14,9 +14,11 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::response::Response;
+use bytes::Bytes;
 use gateway_core::cache::{CachedResponse, EdgeCache};
 use gateway_core::trim::trim_qreta;
 use tokio::sync::watch;
+use uniflight::Merger;
 
 use crate::config::GatewayConfig;
 use crate::kapi::Informer;
@@ -51,7 +53,22 @@ pub struct Gateway {
     /// The drain machinery (kapi.spec EDGE-FR-010's first land): every
     /// in-flight request holds a guard; the barrier waits them out.
     pub drain: graceful_handover::GracefulShutdown,
+    /// Uniflight coalescer for cacheable GET/HEAD forwards: concurrent
+    /// misses for the same key collapse into one upstream fetch; followers
+    /// receive a clone of the leader's buffered response. Non-idempotent
+    /// methods never enter this map.
+    coalescer: Merger<String, Arc<CoalescedForward>>,
     http: reqwest::Client,
+}
+
+/// The buffered result of one upstream forward. `Clone` is cheap (`Bytes`
+/// is refcounted) and `Send + Sync` — the shape uniflight's `Merger`
+/// requires so every follower receives the leader's answer.
+#[derive(Debug, Clone)]
+struct CoalescedForward {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Bytes,
 }
 
 impl Gateway {
@@ -93,6 +110,7 @@ impl Gateway {
             cache: EdgeCache::default(),
             assets: crate::assets_store::AssetStore::new(registry),
             drain: graceful_handover::GracefulShutdown::new(),
+            coalescer: Merger::new(),
             // The forward client NEVER follows redirects: the node's
             // 302 is the caller's answer (their browser follows it
             // against the PUBLIC domain — a server-side follow would
@@ -266,8 +284,10 @@ impl Gateway {
         // the ORIGINAL Host preserved — the node's own table resolves
         // the app and instantiates it through the kubelet arm.
         let url = format!("http://{addr}{path}{query}");
+        let method = parts.method.clone();
+        let coalescible = method == http::Method::GET || method == http::Method::HEAD;
         let mut out = self.http.request(
-            reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+            reqwest::Method::from_bytes(method.as_str().as_bytes())
                 .unwrap_or(reqwest::Method::GET),
             &url,
         );
@@ -287,19 +307,51 @@ impl Gateway {
             }
         };
         out = out.body(body);
+
+        if coalescible {
+            // The coalescing key names the answer, not the caller: same
+            // method + host + path + query + backend. Two clients racing
+            // the same cold cache entry collapse into ONE upstream fetch.
+            // The resolved backend addr is in the key so a route change
+            // mid-flight cannot hand a follower another node's response.
+            let key = format!("{method} {host}{path}{query} -> {addr}");
+            return self.coalesced_forward(&key, out).await;
+        }
         match out.send().await {
             Ok(resp) => proxy_response(resp).await,
-            Err(e) => {
-                // The source chain names the failure (connect vs
-                // body vs pool) — the 502 is the operator's datum.
-                let mut chain = format!("{e}");
-                let mut src = std::error::Error::source(&e);
-                while let Some(cause) = src {
-                    chain.push_str(&format!(" <- {cause}"));
-                    src = std::error::Error::source(cause);
-                }
-                eprintln!("[gateway] forward {path}{query}: {chain}");
-                plain(502, &format!("the node is unreachable: {chain}\n"))
+            Err(e) => forward_error(&e, &path, &query),
+        }
+    }
+
+    /// One upstream fetch per key, shared by all concurrent callers.
+    /// Uniflight elects the first caller leader; followers await it and
+    /// receive a clone of the buffered response. A leader panic is
+    /// surfaced as `LeaderPanicked` — we retry the forward unguarded so
+    /// a panic in one caller never takes the others down with it.
+    async fn coalesced_forward(&self, key: &str, out: reqwest::RequestBuilder) -> Response {
+        // A GET/HEAD builder carries no streaming body, so try_clone is
+        // always Some here; a None would mean a body that cannot be
+        // duplicated — fall back to an unguarded forward in that case.
+        let Some(attempt) = out.try_clone() else {
+            return match out.send().await {
+                Ok(resp) => proxy_response(resp).await,
+                Err(e) => forward_error(&e, key, ""),
+            };
+        };
+        match self
+            .coalescer
+            .execute(key, || async move { Arc::new(forward_buffer(attempt).await) })
+            .await
+        {
+            Ok(coalesced) => buffered_response(&coalesced, true),
+            Err(panicked) => {
+                // The leader panicked inside its forward; retry honestly
+                // rather than handing followers a synthetic failure.
+                eprintln!(
+                    "[gateway] coalescing leader panicked for {key}: {}; retrying unguarded",
+                    panicked.message()
+                );
+                buffered_response(&Arc::new(forward_buffer(out).await), false)
             }
         }
     }
@@ -440,6 +492,83 @@ async fn proxy_response(resp: reqwest::Response) -> Response {
         .body(Body::from_stream(stream))
         .unwrap()
 }
+
+/// The leader's forward: buffer the node's answer into a cloneable
+/// value so uniflight followers can each receive the same response.
+/// GET/HEAD answers are the coalescing domain — small enough (app
+/// pages, API reads) that buffering is an honest trade for deduping
+/// a thundering herd at cold cache entries.
+async fn forward_buffer(out: reqwest::RequestBuilder) -> CoalescedForward {
+    match out.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let headers = resp
+                .headers()
+                .iter()
+                .filter(|(k, _)| !HOP_BY_HOP.contains(&k.as_str()))
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_owned(),
+                        v.to_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect();
+            match resp.bytes().await {
+                Ok(body) => CoalescedForward {
+                    status,
+                    headers,
+                    body,
+                },
+                Err(e) => error_forward(format!("the node dropped the body: {}", error_chain(&e))),
+            }
+        }
+        Err(e) => error_forward(error_chain(&e)),
+    }
+}
+
+/// A forward failure as a buffered 502 (the leader's answer is shared
+/// with its followers — they see the same honest failure, not a retry
+/// storm against a node that is already down).
+fn error_forward(chain: String) -> CoalescedForward {
+    eprintln!("[gateway] coalesced forward: {chain}");
+    CoalescedForward {
+        status: 502,
+        headers: Vec::new(),
+        body: Bytes::from(format!("the node is unreachable: {chain}\n")),
+    }
+}
+
+/// A buffered forward as a wire response. `coalesced` stamps the
+/// operator's datum — "hit" means this answer came through the
+/// coalescer (one upstream fetch shared by all concurrent callers).
+fn buffered_response(buffered: &CoalescedForward, coalesced: bool) -> Response {
+    let mut builder = Response::builder().status(buffered.status);
+    for (name, value) in &buffered.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder = builder.header("x-gateway-cache", "miss");
+    if coalesced {
+        builder = builder.header("x-gateway-coalesced", "hit");
+    }
+    builder.body(Body::from(buffered.body.clone())).unwrap()
+}
+
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut chain = format!("{e}");
+    let mut src = std::error::Error::source(e);
+    while let Some(cause) = src {
+        chain.push_str(&format!(" <- {cause}"));
+        src = std::error::Error::source(cause);
+    }
+    chain
+}
+
+fn forward_error(e: &reqwest::Error, path: &str, query: &str) -> Response {
+    let chain = error_chain(e);
+    eprintln!("[gateway] forward {path}{query}: {chain}");
+    plain(502, &format!("the node is unreachable: {chain}\n"))
+}
+
 
 fn json_response(status: u16, body: &str) -> Response {
     Response::builder()
