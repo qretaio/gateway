@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   build:
+    # The node is x86_64 — a plain musl cross-build (no zig needed).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -25,19 +26,20 @@ jobs:
           toolchain: nightly
           targets: x86_64-unknown-linux-musl
 
-      - name: Install zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
 
       - name: Build static musl binary
-        run: cargo zigbuild --release --target x86_64-unknown-linux-musl --bin gateway
+        env:
+          CC_x86_64_unknown_linux_musl: x86_64-linux-musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl --bin gateway
 
       - name: Stage binary for the image
-        run: cp target/x86_64-unknown-linux-musl/release/gateway build/gateway
+        run: |
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/gateway build/gateway
 
       - uses: docker/setup-buildx-action@v3
 
