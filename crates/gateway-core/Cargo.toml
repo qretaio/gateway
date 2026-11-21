@@ -1,0 +1,30 @@
+[package]
+name = "gateway-core"
+version = "0.1.0"
+edition = "2024"
+description = "The gateway layer pure laws: the host route matcher, the static-asset response law + its AssetSpec, the edge cache store, the inbound trim. Zero I/O, forbid(unsafe)."
+
+[dependencies]
+# The AssetSpec a row's JSON parses into (serde derive on the type).
+serde = { version = "1", features = ["derive"] }
+# The asset law builds http::Response values (the wire shape both the
+# node's serving path and the future edge binary share).
+http = "1"
+# The cache's engine half (`CacheDispatch`) is the async face the WIT
+# crossing implements; the store itself is std-only.
+async-trait = "0.1"
+# The asset law's spec vocabulary is THIS crate's own narrow
+# AssetSpec/`HeaderRule` (hashes feed the ETag, header_rules the
+# `_headers` rules) — the manifest's full grammar never crosses.
+
+# The crate's own posture (the workspace wall converges later; the
+# moved code keeps its lint shape).
+[dev-dependencies]
+serde_json = "1"
+
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -2 }

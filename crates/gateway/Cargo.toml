@@ -1,0 +1,73 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The gateway (the former edge): the outermost serving face for every application the fleet runs. TLS, host routing (the table rides the kapi watch), the edge cache before any backend, forwarding to the fleet over HTTP. Moved into the kapi workspace 2026-11-16 — the `kapi gateway` subcommand runs it standalone, `--with-gateway` runs it in-process; the pure laws live in gateway-core, the OCI pull grammar in this crate's `oci` module (merged from gateway-oci the same day). The lint table below is the crate's own (converging onto the workspace wall is a later slice; the moved code keeps its posture)."
+
+[dependencies]
+# The typed Gateway API — the gateway builds on HttpRoute CRDs: it reads
+# routes from typed gateway.networking.k8s.io/v1 HttpRoute resources and
+# uses CustomResourceExt for the CRD seed.
+gateway-api = { version = "0.23", default-features = false }
+kube = { version = "5", default-features = false, features = ["client", "config", "rustls-tls", "ring", "derive"] }
+# The pure laws (route matcher, asset law + its AssetSpec, cache store,
+# trim) — one home, THIS workspace.
+gateway-core = { path = "../gateway-core" }
+# The spawn arm's home (owner directive 2026-11-16: the gateway's
+# controller belongs with the k8s controllers) — composed here unchanged.
+# The deploy arm's seam lives in the kapi workspace (the sibling checkout).
+controller = { path = "../../../kapi/crates/controller" }
+# The deploy arm (EDGE-FR-017): the real CRI client + supervisor,
+# configured from the node's native CRI-O / RuntimeClass files.
+cri-client = { path = "../../../kapi/crates/cri-client" }
+# The drain discipline: the trigger latches, stop-accept happens
+# structurally before the barrier, the in-flight count is the receiver
+# count.
+graceful-handover = { path = "../graceful-handover" }
+# The serving face (the same stack the node serves with).
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync", "signal", "process"] }
+# The kapi watch client and the node forwarder.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
+# The reuseport bind (kapi.spec EDGE-FR-010): the roll's overlap
+# listens on the same port as its predecessor.
+socket2 = { version = "0.5", features = ["all"] }
+# The self-confinement (kapi.spec EDGE-FR-15): deny-by-default policies
+# (Seatbelt/Landlock), applied restrict_self at boot. The CLI feature
+# stays off — a library consumer never builds clap.
+seatlock = { path = "../../../qretaio/seatlock", default-features = false }
+# The artifact walk extracts the tree in memory; tar/gzip decode the
+# layer; the reference/URL/digest-verify laws ride the oci module.
+oci-spec = "0.10"
+# The oci module's grammar (moved from gateway-oci 2026-11-16): sha2
+# is the digest verify, wasmparser the unit wrapper's custom-section
+# payload walk.
+sha2 = "0.10"
+wasmparser = "0.262"
+tar = "0.4"
+flate2 = "1"
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The live route index (owner directives 2026-11-16: "venndb as the live
+# index built from the delta updates from the watch api" + "directly
+# filter based on target url") — the bitset filter face over the route
+# rows, queried by host + path-prefix predicate; the delta law stays the
+# Table's.
+venndb = "0.7"
+anyhow = "1"
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+
+[dev-dependencies]
+tokio-stream = "0.1"
+
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -2 }

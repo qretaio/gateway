@@ -1,0 +1,37 @@
+[package]
+name = "graceful-handover"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Local handover transport: unix-socket IPC with generic messages and graceful-drain signalling (owner directive 2026-11-07: \"add another graceful-handover crate with local ipc mechanism and signalling with generic messages and then use that in our project ... There seems to be Axum graceful shutdown so try to learn from it\"). The crate carries the sans-I/O cutover machines (the `cutover` module, merged in 2026-11-16) and is their I/O ADAPTER layer: it carries cutover::Message envelopes over a local unix socket and carries the drain discipline axum taught — the trigger is a future (never a callback), stop-accept happens BEFORE draining structurally, the signal latches (watch closure: a late subscriber still observes it), the in-flight count is the receiver count (no atomar counter, no lost-wakeup race), timeouts are explicit and opt-in with a DEFINED forced outcome, and completion resolves the awaited future."
+
+[dependencies]
+# The harness, the trait, and the contract types (moved with the
+# cutover module 2026-11-16): the cutover surface (RunId, Role,
+# Message, Refusal, StateMachine, harness!) is re-exported unchanged
+# for every consumer.
+fsm = { path = "../../../fsm/fsm" }
+# The flow law: hierarchical state machines, no_std, the macro is the
+# default feature. The machines never perform I/O — statig's handlers
+# here only mutate the machine's own storage.
+statig = "0.4"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+# serde is the TRAIT contract, not the wire format: the envelope's
+# derives are unconditional, and the wire is postcard's.
+serde = { version = "1", features = ["derive"] }
+# alloc: the encoder builds one Vec per frame (postcard is
+# no_std first; alloc is opt-in).
+postcard = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]
+# The tests spawn server and client on one runtime.
+futures = "0.3"
+
+# The crate's own posture (the workspace wall converges later; the
+# moved code keeps its lint shape).
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -2 }
