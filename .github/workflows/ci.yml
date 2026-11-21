@@ -25,10 +25,13 @@ jobs:
           toolchain: nightly
           targets: x86_64-unknown-linux-musl
 
-      - name: Install cargo-zigbuild and zig
-        run: |
-          cargo install cargo-zigbuild --locked
-          sudo apt-get update -qq && sudo apt-get install -y -qq zig
+      - name: Install zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
 
       - name: Build static musl binary
         run: cargo zigbuild --release --target x86_64-unknown-linux-musl --bin gateway
