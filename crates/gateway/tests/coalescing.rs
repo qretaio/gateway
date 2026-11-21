@@ -35,7 +35,8 @@ fn pod(name: &str) -> Value {
 }
 
 async fn mock_kapi(seed_rows: Vec<(String, Value)>) -> std::net::SocketAddr {
-    let rows: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::new(std::sync::Mutex::new(seed_rows));
+    let rows: Arc<std::sync::Mutex<Vec<(String, Value)>>> =
+        Arc::new(std::sync::Mutex::new(seed_rows));
     let rows_for_handler = Arc::clone(&rows);
     let app = axum::Router::new().fallback(move |req: Request| {
         let rows = Arc::clone(&rows_for_handler);
@@ -55,7 +56,9 @@ async fn mock_kapi(seed_rows: Vec<(String, Value)>) -> std::net::SocketAddr {
                 return Response::builder()
                     .status(200)
                     .header("content-type", "application/json")
-                    .body(Body::from_stream(stream.map(Ok::<_, std::convert::Infallible>)))
+                    .body(Body::from_stream(
+                        stream.map(Ok::<_, std::convert::Infallible>),
+                    ))
                     .unwrap();
             }
             let items: Vec<Value> = rows
@@ -183,7 +186,10 @@ async fn concurrent_gets_coalesce_into_one_upstream_fetch() {
         1,
         "eight concurrent GETs must collapse into one upstream fetch"
     );
-    assert_eq!(hits, 8, "every caller (leader included) gets the coalesced stamp");
+    assert_eq!(
+        hits, 8,
+        "every caller (leader included) gets the coalesced stamp"
+    );
 }
 
 #[tokio::test]

@@ -287,8 +287,7 @@ impl Gateway {
         let method = parts.method.clone();
         let coalescible = method == http::Method::GET || method == http::Method::HEAD;
         let mut out = self.http.request(
-            reqwest::Method::from_bytes(method.as_str().as_bytes())
-                .unwrap_or(reqwest::Method::GET),
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
             &url,
         );
         for (name, value) in &headers {
@@ -340,7 +339,10 @@ impl Gateway {
         };
         match self
             .coalescer
-            .execute(key, || async move { Arc::new(forward_buffer(attempt).await) })
+            .execute(
+                key,
+                || async move { Arc::new(forward_buffer(attempt).await) },
+            )
             .await
         {
             Ok(coalesced) => buffered_response(&coalesced, true),
@@ -568,7 +570,6 @@ fn forward_error(e: &reqwest::Error, path: &str, query: &str) -> Response {
     eprintln!("[gateway] forward {path}{query}: {chain}");
     plain(502, &format!("the node is unreachable: {chain}\n"))
 }
-
 
 fn json_response(status: u16, body: &str) -> Response {
     Response::builder()
