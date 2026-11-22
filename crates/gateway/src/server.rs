@@ -22,6 +22,7 @@ use uniflight::Merger;
 
 use crate::config::GatewayConfig;
 use crate::kapi::Informer;
+use crate::waf_state::WafState;
 
 /// The gateway's reserved prefix (its own faces; the routing law never
 /// sees these paths).
@@ -56,6 +57,12 @@ pub struct Gateway {
     /// methods never enter this map.
     coalescer: Merger<String, Arc<CoalescedForward>>,
     http: reqwest::Client,
+    /// The compiled WAF ruleset: static TOML rules plus the `WafRule`
+    /// CRs watched from kapi, folded into one shared ruleset. The request
+    /// path only builds an ExecutionContext and runs the closure trees;
+    /// a watch delta recompiles off the hot path. Config validation at
+    /// load guarantees the static half compiles.
+    pub waf: WafState,
 }
 
 /// The buffered result of one upstream forward. `Clone` is cheap (`Bytes`
@@ -92,6 +99,7 @@ impl Gateway {
             }
         }
         let _ = data_root; // reserved for the CRI deploy supervisor
+        let waf = WafState::new(&config.waf.rules);
         // The kapi URL rides the config's [kapi] section — the
         // embedded arm injects the in-process server's URL there
         // before this runs; the standalone subcommand refuses a
@@ -116,6 +124,7 @@ impl Gateway {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("the forward client builds"),
+            waf,
             config,
         }
     }
@@ -188,6 +197,67 @@ impl Gateway {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         {
             headers.insert("x-forwarded-for".to_owned(), ip.0.ip().to_string());
+        }
+
+        // The WAF (wirefilter) walks the SAME trimmed, host-minted view
+        // the route law sees: a client cannot spoof a reserved header
+        // or its own client IP, and a match blocks before any cache or
+        // backend work. Fields are built from the inbound parts plus
+        // the xff the gateway just minted. The watched `WafRule` CRs are
+        // folded in on a generation change (off the hot path); the last
+        // good ruleset stays live if a CR's rules fail to compile.
+        let waf_rules = {
+            let watched = self.informer.table.read().await;
+            self.waf
+                .rules(&watched.waf_rules(), watched.waf_rules_generation())
+        };
+        if !waf_rules.is_empty() {
+            let client_ip = parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip())
+                .or_else(|| {
+                    headers
+                        .get("x-forwarded-for")
+                        .and_then(|v| v.split(',').next())
+                        .and_then(|v| v.trim().parse().ok())
+                });
+            let client_port = parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map_or(0, |c| i64::from(c.0.port()));
+            let waf_request = gateway_core::waf::WafRequest {
+                method: &method,
+                host: &host,
+                path: &path,
+                query: query.strip_prefix('?').unwrap_or(&query),
+                user_agent: headers.get("user-agent").map_or("", String::as_str),
+                referer: headers.get("referer").map_or("", String::as_str),
+                content_type: headers.get("content-type").map_or("", String::as_str),
+                client_ip,
+                client_port,
+                tls: parts
+                    .uri
+                    .scheme()
+                    .is_some_and(|s| s == &http::uri::Scheme::HTTPS),
+            };
+            let verdict = waf_rules.evaluate(&waf_request);
+            if let gateway_core::waf::WafVerdict::Block {
+                rule, status, body, ..
+            } = verdict
+            {
+                // A rule name is operator-supplied config; never let a
+                // stray control character turn a block into a serving
+                // panic. The name is an audit hint, not a trust boundary.
+                let rule_header = http::HeaderValue::from_str(&rule)
+                    .unwrap_or_else(|_| http::HeaderValue::from_static("invalid-rule-name"));
+                return Response::builder()
+                    .status(status)
+                    .header("x-gateway-waf", rule_header)
+                    .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(Body::from(body))
+                    .unwrap();
+            }
         }
 
         // FR-006: the cache consult rides the app's sealed scope; the

@@ -104,6 +104,7 @@ fn gateway_config(kapi: std::net::SocketAddr, node: std::net::SocketAddr) -> Gat
         roll: Default::default(),
         deploy: None,
         sandbox: Default::default(),
+        waf: Default::default(),
     }
 }
 

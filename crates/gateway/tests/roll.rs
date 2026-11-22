@@ -47,6 +47,7 @@ fn gateway_config(
             extra_connect: vec![],
             extra_read: Vec::new(),
         },
+        waf: Default::default(),
     }
 }
 

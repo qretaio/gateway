@@ -29,6 +29,13 @@ pub async fn run(
     data_root: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let _ = data_root; // reserved for the host-side deploy arm (not in-cluster)
+    // The WAF expressions must compile before the gate binds — a typo
+    // is a boot refusal, not a request-time surprise. The TOML path
+    // already validated at load; this closes the embedded/in-process
+    // path that composes a config struct directly.
+    config
+        .validate_waf()
+        .map_err(|e| anyhow::anyhow!("gateway WAF config refused: {e}"))?;
     let this = Arc::new(Gateway::new(config, None));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let informer_this = Arc::clone(&this);

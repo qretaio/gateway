@@ -13,6 +13,14 @@ http = "1"
 # The cache's engine half (`CacheDispatch`) is the async face the WIT
 # crossing implements; the store itself is std-only.
 async-trait = "0.1"
+# The WAF law's expression engine (cloudflare/wirefilter, MIT): Wireshark-
+# like filters parsed/compiled/executed against a request snapshot. Crate
+# name is `wirefilter-engine`; its library (and Rust API root) is `wirefilter`.
+# PINNED TO UNRELEASED MASTER 0.7: this is the version whose compiled
+# `Filter` is Send + Sync (0.6.1's Box<dyn Fn> is not), letting the gateway
+# compile rules ONCE at boot and share them as Arc<Filter> across requests.
+# Rev a101f7c0 (2026-11-16). Revisit when 0.7 lands on crates.io.
+wirefilter-engine = { git = "https://github.com/cloudflare/wirefilter.git", rev = "a101f7c0fc60012803ee23432b5514644d9fbe4f" }
 # The asset law's spec vocabulary is THIS crate's own narrow
 # AssetSpec/`HeaderRule` (hashes feed the ETag, header_rules the
 # `_headers` rules) — the manifest's full grammar never crosses.
@@ -21,6 +29,15 @@ async-trait = "0.1"
 # moved code keeps its lint shape).
 [dev-dependencies]
 serde_json = "1"
+# The WAF engine comparison bench (benches/waf_engines.rs): CEL as the
+# alternative filter engine. Program + Context are Send + Sync, so the
+# bench covers both compile-per-eval and precompiled execution.
+cel-interpreter = "0.10"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "waf_engines"
+harness = false
 
 [lints.rust]
 future_incompatible = { level = "deny", priority = -1 }

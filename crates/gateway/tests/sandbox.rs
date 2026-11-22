@@ -41,6 +41,7 @@ fn config() -> GatewayConfig {
         },
         roll: RollConfig { converge_secs: 30 },
         deploy: None,
+        waf: Default::default(),
     }
 }
 

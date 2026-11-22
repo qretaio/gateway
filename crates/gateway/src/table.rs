@@ -105,6 +105,11 @@ pub enum Family {
     /// an optional HTTPRoute backend. Consulted BEFORE the HTTPRoute
     /// fallback for every request path.
     PublicAssets,
+    /// Typed WafRule CRs (gateway.qreta.io): the gateway's own WAF rules,
+    /// watched from kapi and compiled into the live wirefilter ruleset.
+    /// The CR set is the dynamic half of the WAF; the TOML `[[waf.rules]]`
+    /// section is the static half (both fold into one ruleset).
+    WafRules,
 }
 
 impl Family {
@@ -117,6 +122,7 @@ impl Family {
             Self::Kapinodes => "kapinodes",
             Self::Secrets => "secrets",
             Self::PublicAssets => "publicassets",
+            Self::WafRules => "wafrules",
         }
     }
 
@@ -129,6 +135,11 @@ impl Family {
             Self::Nodes => "/api/v1/nodes".to_owned(),
             Self::Secrets => "/api/v1/secrets".to_owned(),
             Self::Httproutes => "/apis/gateway.networking.k8s.io/v1/httproutes".to_owned(),
+            Self::WafRules => format!(
+                "/apis/{}/{}",
+                gateway_core::crd::GROUP_VERSION,
+                Self::WafRules.plural()
+            ),
             other => format!("/apis/kapi.qreta.io/v1alpha1/{}", other.plural()),
         }
     }
@@ -216,6 +227,14 @@ pub struct Table {
     /// (org, name) -> a PublicAssets CR's resolved binding. Keyed by the
     /// CR's own metadata name; `http_route_ref` names the fallback route.
     public_assets: BTreeMap<(String, String), PublicAssetsBinding>,
+    /// (namespace, name) -> a WafRule CR's ordered rules. Keyed by the
+    /// CR's metadata so a delta is a single map edit; the gateway folds
+    /// every CR's rules (in name order) into the live compiled ruleset.
+    waf_rules: BTreeMap<(String, String), Vec<gateway_core::crd::WafRuleEntry>>,
+    /// Bumped on every WafRules family delta. The serving face compares
+    /// it against its last compile and recompiles only when the CR set
+    /// actually changed — no work on the hot path when rules are static.
+    waf_rules_generation: u64,
 }
 
 /// The gateway's view of a PublicAssets CR: the OCI/volume source, the
@@ -309,6 +328,9 @@ impl Table {
         if family.carries_routes() {
             self.rebuild_index();
         }
+        if family == Family::WafRules {
+            self.waf_rules_generation = self.waf_rules_generation.wrapping_add(1);
+        }
     }
 
     /// Replace one family wholesale (the re-list law: the informer
@@ -327,6 +349,7 @@ impl Table {
             Family::Nodes => self.node_rows.clear(),
             Family::Secrets => self.secrets.clear(),
             Family::PublicAssets => self.public_assets.clear(),
+            Family::WafRules => self.waf_rules.clear(),
             Family::Kapinodes => return,
         }
         for item in items {
@@ -334,6 +357,9 @@ impl Table {
         }
         if routes_family {
             self.rebuild_index();
+        }
+        if family == Family::WafRules {
+            self.waf_rules_generation = self.waf_rules_generation.wrapping_add(1);
         }
     }
 
@@ -378,6 +404,12 @@ impl Table {
                 };
                 self.public_assets.insert((org, name), binding);
             }
+            Family::WafRules => {
+                let Some((namespace, name, rules)) = waf_rule_row(object) else {
+                    return;
+                };
+                self.waf_rules.insert((namespace, name), rules);
+            }
         }
     }
 
@@ -415,7 +447,42 @@ impl Table {
                     self.public_assets.remove(&(org, name));
                 }
             }
+            Family::WafRules => {
+                if let Some((namespace, name, _)) = waf_rule_row(object) {
+                    self.waf_rules.remove(&(namespace, name));
+                }
+            }
         }
+    }
+
+    /// The WAF ruleset generation. Bumped on every WafRules family delta;
+    /// the serving face uses it to know when to recompile.
+    #[must_use]
+    pub fn waf_rules_generation(&self) -> u64 {
+        self.waf_rules_generation
+    }
+
+    /// The ordered WAF rules from every watched `WafRule` CR, folded into
+    /// the law's shape. BTreeMap order (namespace, then name) is the
+    /// deterministic compile order; within a CR the spec's order is kept.
+    /// A CR whose rule name is blank is skipped — an audit header needs
+    /// an identity. The TOML-configured rules are prepended by the caller
+    /// (the gateway) so static rules run before watched ones.
+    #[must_use]
+    pub fn waf_rules(&self) -> Vec<gateway_core::waf::WafRule> {
+        self.waf_rules
+            .values()
+            .flatten()
+            .filter(|r| !r.name.is_empty())
+            .map(|r| gateway_core::waf::WafRule {
+                name: r.name.clone(),
+                expression: r.expression.clone(),
+                action: r.action,
+                status: r.status,
+                body: r.body.clone(),
+                enabled: r.enabled,
+            })
+            .collect()
     }
 
     /// Resolve (host, path) to the app identity + the node address,
@@ -691,6 +758,20 @@ fn public_assets_row(object: &serde_json::Value) -> Option<(String, String, Publ
             header_rules: status.header_rules,
         },
     ))
+}
+
+/// A typed WafRule CR -> (namespace, name, ordered rules). A malformed
+/// spec (bad JSON shape) contributes nothing — the kapi controller marks
+/// it not-ready and the gateway keeps its last good ruleset. The rules
+/// themselves are validated at compile time on the recompile seam.
+fn waf_rule_row(
+    object: &serde_json::Value,
+) -> Option<(String, String, Vec<gateway_core::crd::WafRuleEntry>)> {
+    let namespace = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
+    let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
+    let spec: gateway_core::crd::WafRuleSpec =
+        serde_json::from_value(object.get("spec")?.clone()).ok()?;
+    Some((namespace, name, spec.rules))
 }
 
 /// A typed HttpRoute row: (org, app, projection). The route's hostnames
@@ -1228,6 +1309,33 @@ mod tests {
             Family::Httproutes.list_path(),
             "/apis/gateway.networking.k8s.io/v1/httproutes"
         );
+        assert_eq!(
+            Family::WafRules.list_path(),
+            "/apis/gateway.qreta.io/v1alpha1/wafrules"
+        );
+    }
+
+    /// A WafRule CR's ordered rules land in the table and bump the
+    /// generation; deleting it clears the rules and bumps again.
+    #[test]
+    fn wafrule_crs_are_tracked_with_a_generation() {
+        let mut t = Table::default();
+        assert_eq!(t.waf_rules_generation(), 0);
+        let cr = json!({
+            "apiVersion": "gateway.qreta.io/v1alpha1", "kind": "WafRule",
+            "metadata": {"name": "scanners", "namespace": "acme"},
+            "spec": {"rules": [
+                {"name": "no-scanners", "expression": r#"http.ua contains "sqlmap""#}
+            ]}
+        });
+        t.apply(Family::WafRules, "ADDED", &cr);
+        assert_eq!(t.waf_rules_generation(), 1);
+        let rules = t.waf_rules();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "no-scanners");
+        t.apply(Family::WafRules, "DELETED", &cr);
+        assert_eq!(t.waf_rules_generation(), 2);
+        assert!(t.waf_rules().is_empty());
     }
 
     /// The old law, verbatim: the linear argmax scan over every known

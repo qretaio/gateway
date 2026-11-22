@@ -234,6 +234,7 @@ fn gateway_config(kapi: std::net::SocketAddr, node: std::net::SocketAddr) -> Gat
         roll: Default::default(),
         deploy: None,
         sandbox: Default::default(),
+        waf: Default::default(),
     }
 }
 
@@ -402,6 +403,113 @@ async fn a_route_without_a_pod_503s_honestly() {
     // No pods and no default node: the gateway answers honestly — 503,
     // the node never wakes (the kubelet-arm instantiation is slice 3).
     assert_eq!(resp.status().as_u16(), 503);
+}
+
+/// The full WAF seam over the real watch: a `WafRule` CR seeded in the
+/// kapi LIST is compiled by the informer and blocks a request before the
+/// node sees it; a CR injected later on the live watch stream takes
+/// effect on the next request; allowed traffic still reaches the node.
+#[tokio::test]
+async fn wafrule_crs_from_the_watch_validate_real_requests() {
+    use gateway::table::Family;
+
+    let node_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let node_addr = mock_node(Arc::clone(&node_hits)).await;
+    let app_row = hr("orders", &["orders.example.com"]);
+    let pod_row = json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "acme-orders", "namespace": "acme",
+                     "labels": {"app": "orders", "org": "acme"}},
+        "spec": {"nodeName": "node-a"}, "status": {"phase": "Running"}
+    });
+    let scanner_cr = json!({
+        "apiVersion": "gateway.qreta.io/v1alpha1", "kind": "WafRule",
+        "metadata": {"name": "scanners", "namespace": "acme"},
+        "spec": {"rules": [
+            {"name": "cr-no-scanners", "expression": r#"http.ua contains "sqlmap""#}
+        ]}
+    });
+    let (kapi_addr, events) = mock_kapi(vec![
+        ("httproutes".to_owned(), app_row),
+        ("pods".to_owned(), pod_row),
+        ("wafrules".to_owned(), scanner_cr.clone()),
+    ])
+    .await;
+    let gateway_addr = boot_gateway(gateway_config(kapi_addr, node_addr)).await;
+    let client = reqwest::Client::new();
+
+    // Wait for informer convergence: the health face reports the app once
+    // every family's LIST (including wafrules) has landed.
+    let mut converged = false;
+    for _ in 0..100 {
+        if let Ok(resp) = client
+            .get(format!("http://{gateway_addr}/__gateway/health"))
+            .send()
+            .await
+            && let Ok(health) = resp.json::<Value>().await
+            && health["apps"] == 1
+            && health["served"] == 1
+        {
+            converged = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        converged,
+        "the informer never converged (wafrules LIST included)"
+    );
+
+    // The seeded CR blocks a scanner before the node sees the request.
+    let blocked = client
+        .get(format!("http://{gateway_addr}/cart/1"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "sqlmap/1.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status().as_u16(), 403);
+    assert_eq!(blocked.headers()["x-gateway-waf"], "cr-no-scanners");
+    assert_eq!(node_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // A normal request passes through to the node.
+    let allowed = client
+        .get(format!("http://{gateway_addr}/cart/1"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "Mozilla/5.0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status().as_u16(), 200);
+    assert_eq!(node_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Inject a second CR on the live watch stream: it must take effect
+    // on the NEXT request without a restart.
+    let admin_cr = json!({
+        "apiVersion": "gateway.qreta.io/v1alpha1", "kind": "WafRule",
+        "metadata": {"name": "admin", "namespace": "acme"},
+        "spec": {"rules": [
+            {"name": "cr-no-admin", "expression": r#"http.path contains "/admin""#}
+        ]}
+    });
+    let _ = events.send((
+        Family::WafRules.plural().to_owned(),
+        "ADDED".to_owned(),
+        admin_cr,
+    ));
+    // Let the watch deliver and the table apply the delta.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let blocked_again = client
+        .get(format!("http://{gateway_addr}/admin"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "Mozilla/5.0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_again.status().as_u16(), 403);
+    assert_eq!(blocked_again.headers()["x-gateway-waf"], "cr-no-admin");
+    assert_eq!(node_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]

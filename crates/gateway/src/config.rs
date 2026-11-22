@@ -5,6 +5,8 @@
 
 use serde::Deserialize;
 
+pub use gateway_core::waf::{WafAction, WafRule};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
     /// The plain HTTP listener for everything the gateway serves
@@ -67,6 +69,23 @@ pub struct GatewayConfig {
     /// config itself. Defaults OFF (the dev loop unrestricted).
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// The WAF rules (`[[waf.rules]]`): Cloudflare wirefilter
+    /// expressions evaluated against every inbound request after the
+    /// reserved-header trim. First matching rule blocks; no rules is a
+    /// no-op (the WAF is off unless configured). Rules are validated at
+    /// config load — a malformed expression is a boot refusal.
+    #[serde(default)]
+    pub waf: WafConfig,
+}
+
+/// The WAF section (`[[waf.rules]]`). Empty rules = the filter layer is
+/// inert; every request walks the normal route pipeline.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct WafConfig {
+    /// Ordered rules — the first match blocks. Order is significant and
+    /// preserved from the config file.
+    #[serde(default)]
+    pub rules: Vec<WafRule>,
 }
 
 /// The deploy arm's CRI configuration (`[deploy.cri]`).
@@ -195,7 +214,17 @@ pub struct GatewaySection {
 impl GatewayConfig {
     pub fn load(path: &str) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-        toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
+        let config: Self = toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
+        config.validate_waf()?;
+        Ok(config)
+    }
+
+    /// Validate every enabled WAF rule's expression at the config
+    /// boundary — a typo is a loud boot refusal, never a request-time
+    /// surprise. Also called by the embedded arm before it composes the
+    /// gateway.
+    pub fn validate_waf(&self) -> Result<(), String> {
+        gateway_core::waf::validate(&self.waf.rules).map_err(|e| e.to_string())
     }
 
     /// The serving address for a node name: the config map first, then
@@ -235,5 +264,58 @@ impl GatewayConfig {
         connects.insert(443);
         connects.extend(self.sandbox.extra_connect.iter().copied());
         (binds, connects.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WAF section parses in TOML with the documented defaults, and
+    /// an enabled rule's expression is validated at load — a typo is a
+    /// boot refusal, not a request-time surprise.
+    #[test]
+    fn waf_config_parses_and_validates_at_the_boundary() {
+        let raw = r#"
+            [listen]
+            addr = "127.0.0.1:8080"
+            [kapi]
+            url = "http://127.0.0.1:8643"
+
+            [[waf.rules]]
+            name = "no-scanners"
+            expression = 'http.ua contains "sqlmap"'
+
+            [[waf.rules]]
+            name = "parked"
+            expression = "not a valid expression !!!"
+            enabled = false
+        "#;
+        let config: GatewayConfig = toml::from_str(raw).unwrap();
+        assert_eq!(config.waf.rules.len(), 2);
+        let first = &config.waf.rules[0];
+        assert_eq!(first.name, "no-scanners");
+        assert_eq!(first.status, 403);
+        assert_eq!(first.body, "blocked by the WAF\n");
+        assert!(first.enabled);
+        assert_eq!(first.action, WafAction::Block);
+        assert!(!config.waf.rules[1].enabled);
+        config.validate_waf().expect("the parked rule is skipped");
+    }
+
+    #[test]
+    fn a_broken_waf_expression_refuses_the_config() {
+        let raw = r#"
+            [listen]
+            addr = "127.0.0.1:8080"
+            [kapi]
+            url = "http://127.0.0.1:8643"
+            [[waf.rules]]
+            name = "typo"
+            expression = "http.method ==="
+        "#;
+        let config: GatewayConfig = toml::from_str(raw).unwrap();
+        let err = config.validate_waf().unwrap_err();
+        assert!(err.contains("typo"), "the error names the rule: {err}");
     }
 }

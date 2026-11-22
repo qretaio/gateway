@@ -21,3 +21,4 @@ pub mod oci;
 pub mod sandbox;
 pub mod server;
 pub mod table;
+pub mod waf_state;
