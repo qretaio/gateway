@@ -199,6 +199,24 @@ impl FamilyLoop {
             .await
             .map_err(|e| format!("list: {e}"))?;
         let status = resp.status();
+        if status.as_u16() == 404 {
+            // An unregistered CRD (e.g. `WafRule`/`RateLimit` on a fleet
+            // whose kapi predates them) means "no rules of that kind",
+            // NOT a boot refusal. Seed an EMPTY family with a synthetic
+            // rv so the FR-013 convergence gate can latch — fail open,
+            // as the WAF/ratelimit laws themselves do when empty.
+            let mut table = self.inner.table.write().await;
+            table.replace(self.family, &[]);
+            drop(table);
+            self.set_state(|s| {
+                s.resource_version = Some("0".to_owned());
+                s.connected = true;
+            });
+            // No watch to run on a missing resource; a short quiet cycle
+            // retries so a CRD registered later is picked up.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            return Ok(());
+        }
         if !status.is_success() {
             return Err(format!("list: HTTP {status}"));
         }
