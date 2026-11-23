@@ -183,7 +183,8 @@ impl Gateway {
     /// scripts), and the hardening law never removes an upstream header.
     /// Defaults only fill gaps.
     async fn handle(&self, req: Request) -> Response {
-        let mut resp = self.handle_inner(req).await;
+        let mut overrides: Option<Vec<(String, String)>> = None;
+        let mut resp = self.handle_inner(req, &mut overrides).await;
         for (name, value) in self.config.hardening.headers() {
             if let Ok(v) = http::HeaderValue::from_str(&value) {
                 use http::header::HeaderName;
@@ -194,10 +195,29 @@ impl Gateway {
                 }
             }
         }
+        // A matched WafRule with action: hardening applies its response-header
+        // overrides AFTER the global defaults: an empty value suppresses the
+        // header entirely (lets an app be framed), a non-empty value replaces
+        // the default for this request only.
+        if let Some(headers) = overrides {
+            for (name, value) in headers {
+                if let Ok(hname) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                    if value.is_empty() {
+                        resp.headers_mut().remove(&hname);
+                    } else if let Ok(v) = http::HeaderValue::from_str(&value) {
+                        resp.headers_mut().insert(hname, v);
+                    }
+                }
+            }
+        }
         resp
     }
 
-    async fn handle_inner(&self, req: Request) -> Response {
+    async fn handle_inner(
+        &self,
+        req: Request,
+        overrides: &mut Option<Vec<(String, String)>>,
+    ) -> Response {
         let (parts, body) = req.into_parts();
         let method = parts.method.as_str().to_owned();
         let host = parts
@@ -359,7 +379,7 @@ impl Gateway {
             return Response::builder()
                 .status(429)
                 .header("retry-after", "60")
-                .header("x-gateway-rate", "private-path-penalty")
+                .header("x-qreta-rate", "private-path-penalty")
                 .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(Body::from("rate limit exceeded\n"))
                 .unwrap();
@@ -393,7 +413,7 @@ impl Gateway {
                     return Response::builder()
                         .status(429)
                         .header("retry-after", secs.to_string())
-                        .header("x-gateway-rate", sanitize_header_value(&rule.name))
+                        .header("x-qreta-rate", sanitize_header_value(&rule.name))
                         .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                         .body(Body::from("rate limit exceeded\n"))
                         .unwrap();
@@ -421,6 +441,9 @@ impl Gateway {
             self.waf.rules(&watched_waf, watched_waf_gen)
         };
         let verdict = waf_rules.evaluate(&waf_request);
+        if let gateway_core::waf::WafVerdict::Hardening { headers, .. } = &verdict {
+            *overrides = Some(headers.clone());
+        }
         if let gateway_core::waf::WafVerdict::Block {
             ref rule, action, ..
         } = verdict
@@ -442,7 +465,7 @@ impl Gateway {
             return Response::builder()
                 .status(200)
                 .header("content-type", "text/html; charset=utf-8")
-                .header("x-gateway-waf", sanitize_header_value(rule))
+                .header("x-qreta-waf", sanitize_header_value(rule))
                 .header("cache-control", "no-store")
                 .body(Body::from(page))
                 .unwrap();
@@ -478,7 +501,7 @@ impl Gateway {
                 .unwrap_or_else(|_| http::HeaderValue::from_static("invalid-rule-name"));
             return Response::builder()
                 .status(status)
-                .header("x-gateway-waf", rule_header)
+                .header("x-qreta-waf", rule_header)
                 .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(Body::from(body))
                 .unwrap();
@@ -516,7 +539,7 @@ impl Gateway {
                 builder = builder.header(k, v);
             }
             return builder
-                .header("x-gateway-cache", "asset")
+                .header("x-qreta-cache", "asset")
                 .body(Body::from(body))
                 .unwrap();
         }
@@ -776,7 +799,7 @@ fn cached_response(cached: CachedResponse, age_secs: u64) -> Response {
     }
     builder
         .header("age", age_secs.to_string())
-        .header("x-gateway-cache", "hit")
+        .header("x-qreta-cache", "hit")
         .body(Body::from(cached.body))
         .unwrap()
 }
@@ -795,7 +818,7 @@ async fn proxy_response(resp: reqwest::Response) -> Response {
     }
     let stream = resp.bytes_stream();
     builder
-        .header("x-gateway-cache", "miss")
+        .header("x-qreta-cache", "miss")
         .body(Body::from_stream(stream))
         .unwrap()
 }
@@ -853,9 +876,9 @@ fn buffered_response(buffered: &CoalescedForward, coalesced: bool) -> Response {
     for (name, value) in &buffered.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    builder = builder.header("x-gateway-cache", "miss");
+    builder = builder.header("x-qreta-cache", "miss");
     if coalesced {
-        builder = builder.header("x-gateway-coalesced", "hit");
+        builder = builder.header("x-qreta-coalesced", "hit");
     }
     builder.body(Body::from(buffered.body.clone())).unwrap()
 }

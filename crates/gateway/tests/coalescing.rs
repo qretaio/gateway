@@ -1,6 +1,6 @@
 //! Uniflight coalescing, end to end: N clients racing the same cold
 //! route collapse into ONE upstream fetch; followers see
-//! `x-gateway-coalesced: hit`. Non-coalescible methods are proven to
+//! `x-qreta-coalesced: hit`. Non-coalescible methods are proven to
 //! stay unguarded (each POST reaches the node).
 
 use std::sync::{
@@ -181,7 +181,7 @@ async fn concurrent_gets_coalesce_into_one_upstream_fetch() {
     for handle in handles {
         let resp = handle.await.unwrap();
         assert_eq!(resp.status(), 200);
-        if resp.headers().get("x-gateway-coalesced").is_some() {
+        if resp.headers().get("x-qreta-coalesced").is_some() {
             hits += 1;
         }
         assert_eq!(resp.text().await.unwrap(), "one answer");
@@ -251,7 +251,7 @@ async fn posts_are_never_coalesced() {
     for handle in handles {
         let resp = handle.await.unwrap();
         assert_eq!(resp.status(), 200);
-        assert!(resp.headers().get("x-gateway-coalesced").is_none());
+        assert!(resp.headers().get("x-qreta-coalesced").is_none());
     }
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 }

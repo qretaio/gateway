@@ -132,7 +132,7 @@ async fn a_matching_rule_blocks_before_the_backend_sees_the_request() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert_eq!(resp.headers()["x-gateway-waf"], "no-scanners");
+    assert_eq!(resp.headers()["x-qreta-waf"], "no-scanners");
     assert_eq!(resp.text().await.unwrap(), "blocked by the WAF\n");
     assert_eq!(
         hits.load(Ordering::SeqCst),
@@ -190,7 +190,7 @@ async fn method_path_query_and_ip_rules_all_fire() {
         .await
         .unwrap();
     assert_eq!(method.status(), StatusCode::FORBIDDEN);
-    assert_eq!(method.headers()["x-gateway-waf"], "no-post");
+    assert_eq!(method.headers()["x-qreta-waf"], "no-post");
 
     let path = client
         .get(format!("http://{addr}/admin"))
@@ -198,7 +198,7 @@ async fn method_path_query_and_ip_rules_all_fire() {
         .send()
         .await
         .unwrap();
-    assert_eq!(path.headers()["x-gateway-waf"], "admin-path");
+    assert_eq!(path.headers()["x-qreta-waf"], "admin-path");
 
     let query = client
         .get(format!("http://{addr}/?token=abc"))
@@ -206,7 +206,7 @@ async fn method_path_query_and_ip_rules_all_fire() {
         .send()
         .await
         .unwrap();
-    assert_eq!(query.headers()["x-gateway-waf"], "query-token");
+    assert_eq!(query.headers()["x-qreta-waf"], "query-token");
 }
 
 #[tokio::test]
@@ -246,12 +246,12 @@ async fn a_challenge_action_answers_503() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(resp.headers()["x-gateway-waf"], "bot-check");
+    assert_eq!(resp.headers()["x-qreta-waf"], "bot-check");
 }
 
 /// A `WafRule` CR (gateway.qreta.io/v1alpha1) watched from kapi is
 /// compiled into the live ruleset and blocks a request — no static TOML
-/// rule needed. The `x-gateway-waf` header names the CR's rule.
+/// rule needed. The `x-qreta-waf` header names the CR's rule.
 #[tokio::test]
 async fn a_watched_wafrule_cr_blocks_a_request() {
     let hits = Arc::new(AtomicUsize::new(0));
@@ -280,7 +280,7 @@ async fn a_watched_wafrule_cr_blocks_a_request() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert_eq!(resp.headers()["x-gateway-waf"], "cr-no-scanners");
+    assert_eq!(resp.headers()["x-qreta-waf"], "cr-no-scanners");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
 
@@ -324,7 +324,7 @@ async fn a_wafrule_cr_added_after_boot_is_picked_up_live() {
         .await
         .unwrap();
     assert_eq!(after.status(), StatusCode::FORBIDDEN);
-    assert_eq!(after.headers()["x-gateway-waf"], "cr-no-admin");
+    assert_eq!(after.headers()["x-qreta-waf"], "cr-no-admin");
 }
 
 /// A CR whose expression is invalid cannot poison the ruleset: the last
@@ -356,7 +356,7 @@ async fn a_bad_wafrule_cr_keeps_the_last_good_ruleset() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.headers()["x-gateway-waf"], "static-block");
+    assert_eq!(resp.headers()["x-qreta-waf"], "static-block");
 }
 
 /// Reserved private/admin paths are dropped unconditionally (even with no
@@ -380,7 +380,7 @@ async fn private_paths_are_blocked_and_the_ip_is_immediately_penalized() {
         .await
         .unwrap();
     assert_eq!(probe.status(), StatusCode::NOT_FOUND);
-    assert_eq!(probe.headers()["x-gateway-waf"], "reserved-private-path");
+    assert_eq!(probe.headers()["x-qreta-waf"], "reserved-private-path");
     assert_eq!(
         hits.load(Ordering::SeqCst),
         0,
@@ -396,7 +396,7 @@ async fn private_paths_are_blocked_and_the_ip_is_immediately_penalized() {
         .await
         .unwrap();
     assert_eq!(after.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(after.headers()["x-gateway-rate"], "private-path-penalty");
+    assert_eq!(after.headers()["x-qreta-rate"], "private-path-penalty");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
 
@@ -484,6 +484,58 @@ async fn hardening_headers_are_stamped_on_every_response() {
     assert_eq!(resp.headers()["x-frame-options"], "DENY");
     assert!(resp.headers().contains_key("strict-transport-security"));
     assert!(resp.headers().contains_key("content-security-policy"));
+}
+
+/// A WafRule CR with `action: hardening` suppresses the global frame
+/// deny for the matched request only, so an app's framed content endpoint
+/// loads. Unnamed headers keep their gateway defaults.
+#[tokio::test]
+async fn a_hardening_wafrule_cr_suppresses_frame_options() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let node = mock_node(Arc::clone(&hits)).await;
+    let (addr, gw) = boot(config("http://127.0.0.1:1", node, vec![])).await;
+    {
+        let mut table = gw.informer.table.write().await;
+        table.apply(
+            Family::WafRules,
+            "ADDED",
+            &json!({
+                "apiVersion": "gateway.qreta.io/v1alpha1", "kind": "WafRule",
+                "metadata": {"name": "content-frame", "namespace": "acme"},
+                "spec": {"rules": [
+                    {"name": "content-frame", "expression": r#"http.path contains "/content""#,
+                     "action": "hardening", "headers": {"x-frame-options": ""}}
+                ]}
+            }),
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let framed = client
+        .get(format!("http://{addr}/api/entry/1/content"))
+        .header("host", "orders.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(framed.status(), StatusCode::OK);
+    assert!(
+        framed.headers().get("x-frame-options").is_none(),
+        "the matched request must be framable"
+    );
+    assert_eq!(framed.headers()["x-content-type-options"], "nosniff");
+    assert!(framed.headers().contains_key("content-security-policy"));
+
+    let other = client
+        .get(format!("http://{addr}/"))
+        .header("host", "orders.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        other.headers()["x-frame-options"],
+        "DENY",
+        "other requests keep the default"
+    );
 }
 
 /// An upstream app's own CSP wins over the gateway default. Resonate

@@ -473,7 +473,7 @@ async fn wafrule_crs_from_the_watch_validate_real_requests() {
         .await
         .unwrap();
     assert_eq!(blocked.status().as_u16(), 403);
-    assert_eq!(blocked.headers()["x-gateway-waf"], "cr-no-scanners");
+    assert_eq!(blocked.headers()["x-qreta-waf"], "cr-no-scanners");
     assert_eq!(node_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     // A normal request passes through to the node.
@@ -512,7 +512,7 @@ async fn wafrule_crs_from_the_watch_validate_real_requests() {
         .await
         .unwrap();
     assert_eq!(blocked_again.status().as_u16(), 403);
-    assert_eq!(blocked_again.headers()["x-gateway-waf"], "cr-no-admin");
+    assert_eq!(blocked_again.headers()["x-qreta-waf"], "cr-no-admin");
     assert_eq!(node_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 

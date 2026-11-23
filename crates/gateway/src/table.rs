@@ -514,6 +514,11 @@ impl Table {
                 action: r.action,
                 status: r.status,
                 body: r.body.clone(),
+                headers: r
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
                 enabled: r.enabled,
             })
             .collect()

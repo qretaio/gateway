@@ -21,7 +21,7 @@ cargo clippy --all-targets
   [`uniflight::Merger`](https://github.com/microsoft/oxidizer/tree/main/crates/uniflight):
   N clients racing the same cold route collapse into one upstream fetch;
   followers receive a clone of the leader's buffered response. The
-  `x-gateway-coalesced: hit` header marks those answers. Non-idempotent
+  `x-qreta-coalesced: hit` header marks those answers. Non-idempotent
   methods (POST/PUT/DELETE/…) are never coalesced.
 - **WAF filters** with [Cloudflare wirefilter](https://github.com/cloudflare/wirefilter)
   (unreleased 0.7 master, pinned — its compiled `Filter` is `Send + Sync`):
@@ -31,8 +31,8 @@ cargo clippy --all-targets
   Rules are parsed and compiled ONCE at boot into a shared `WafRules`
   (`Arc<Filter>` per rule); the request path only builds an execution
   context and runs the closure trees (~134 ns for four rules). First
-  match blocks (the node never sees it) and stamps `x-gateway-waf: <rule>`.
-  Bad expressions are a boot refusal. No rules = the configurable layer is inert, **but** the reserved private/admin paths `/__private/` and `/__internal/` (and their bare roots) are dropped unconditionally by a built-in check — these are the node's admin-channel faces and must never be reachable at the public edge. The deny runs before the ruleset, returns 404, and stamps `x-gateway-waf: reserved-private-path`.
+  match blocks (the node never sees it) and stamps `x-qreta-waf: <rule>`.
+  Bad expressions are a boot refusal. No rules = the configurable layer is inert, **but** the reserved private/admin paths `/__private/` and `/__internal/` (and their bare roots) are dropped unconditionally by a built-in check — these are the node's admin-channel faces and must never be reachable at the public edge. The deny runs before the ruleset, returns 404, and stamps `x-qreta-waf: reserved-private-path`.
  - **Incident logging (plain tracing)**: private/admin path probes and
    rate-limit penalties emit structured `tracing::warn!` events with
    `target: "incident"` and named fields (`client_ip`, `host`, `path`,
@@ -54,7 +54,7 @@ cargo clippy --all-targets
  - **Rate limits** with bounded sliding-window counters ahead of the WAF:
   `[[ratelimit.rules]]` bound a client (optionally per route). The first
   rule past its budget answers 429 with `Retry-After` and
-  `x-gateway-rate: <rule>`; a blocked hit is not recorded, so it cannot
+  `x-qreta-rate: <rule>`; a blocked hit is not recorded, so it cannot
   extend its own ban. The counter map is capped and LRU-evicted, so a
   spray of source IPs cannot grow it without limit. No rules = inert.
   Limits also arrive as watched, namespace-local `RateLimit` CRs whose
@@ -173,13 +173,43 @@ metadata:
   namespace: acme
 spec:
   rules:
-    - name: no-scanners           # stamped on x-gateway-waf
+    - name: no-scanners           # stamped on x-qreta-waf
       expression: 'http.ua contains "sqlmap"'
       # action: block            # default; "challenge" answers 503
       # status: 403              # default
       # body: "blocked by the WAF\n"
       # enabled: true            # default
 ```
+
+### Per-route response-header overrides (`action: hardening`)
+
+A `WafRule` with `action: hardening` does NOT block — a matching request
+proceeds, and its `headers` map overrides the gateway's default hardening
+headers for that response only. An empty value SUPPRESSES the header; a
+non-empty value replaces it. This lets one app relax an edge default
+(e.g. allow its `/content` iframe to be framed) without weakening the
+gateway for everyone else.
+
+```yaml
+apiVersion: gateway.qreta.io/v1alpha1
+kind: WafRule
+metadata:
+  name: resonate-content-frame
+  namespace: qreta
+spec:
+  rules:
+    - name: resonate-content-frame
+      expression: 'http.host == "resonate.qreta.io" and http.path contains "/content"'
+      action: hardening
+      headers:
+        x-frame-options: ""          # suppress the global frame deny
+        # referrer-policy: "no-referrer"  # or replace any other default
+```
+
+Hardening rules are evaluated in the same ordered ruleset as block/challenge
+rules — the first match wins, so place them before any broader block that
+would otherwise catch the request. The override is applied AFTER the global
+hardening pass, and a suppressed header stays absent (it is not re-stamped).
 
 A CR with no `spec.rules` is inert. The wire types live in
 `gateway-core::crd` (`WafRuleSpec`, `WafRuleEntry`, `WafRuleStatus`);
@@ -201,7 +231,7 @@ carry multiple independent rules; each has three stages:
    Missing headers contribute an empty component.
 3. **`limit` / `windowSecs`** — the bounded sliding-window counter, per
    bucket. The first rule over budget answers 429 with `Retry-After` and
-   `x-gateway-rate: <rule>`.
+   `x-qreta-rate: <rule>`.
 
 ```yaml
 apiVersion: gateway.qreta.io/v1alpha1

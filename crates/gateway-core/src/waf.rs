@@ -31,7 +31,7 @@ use wirefilter::{ExecutionContext, Filter, Scheme};
 /// is below this check).
 pub const PRIVATE_PATH_PREFIXES: &[&str] = &["/__private/", "/__internal/"];
 
-/// The `x-gateway-waf` rule name stamped on a reserved-prefix block.
+/// The `x-qreta-waf` rule name stamped on a reserved-prefix block.
 pub const PRIVATE_PATH_RULE: &str = "reserved-private-path";
 
 /// Path segments that must never be served from the public edge. These
@@ -182,6 +182,12 @@ pub struct WafRule {
     /// The body a block returns (default "blocked by the WAF\n").
     #[serde(default = "default_block_body")]
     pub body: String,
+    /// Response-header overrides applied when this rule matches and the
+    /// action is Hardening. Empty string value SUPPRESSES the header; a
+    /// non-empty value overrides the gateway default. Names are
+    /// lowercased by the caller when applied.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     /// A parked rule never runs.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -205,6 +211,7 @@ impl Default for WafRule {
             action: WafAction::default(),
             status: default_block_status(),
             body: default_block_body(),
+            headers: Vec::new(),
             enabled: default_enabled(),
         }
     }
@@ -221,6 +228,9 @@ pub enum WafAction {
     Block,
     /// Signal a challenge (503 by default).
     Challenge,
+    /// Apply the rule's response-header overrides and let the request
+    /// through (an app relaxing an edge default, e.g. its content iframe).
+    Hardening,
 }
 
 /// The request facts the WAF can filter on. Values are borrowed so a
@@ -259,12 +269,18 @@ pub enum WafVerdict {
     /// No enabled rule matched.
     Allow,
     /// A rule matched: the response the gateway returns, and the name
-    /// of the rule that fired (for the `x-gateway-waf` header).
+    /// of the rule that fired (for the `x-qreta-waf` header).
     Block {
         rule: String,
         status: u16,
         body: String,
         action: WafAction,
+    },
+    /// A Hardening rule matched: the request proceeds, and these
+    /// response-header overrides are applied after the global defaults.
+    Hardening {
+        rule: String,
+        headers: Vec<(String, String)>,
     },
 }
 
@@ -275,11 +291,20 @@ impl WafVerdict {
         matches!(self, Self::Block { .. })
     }
 
+    /// The header overrides when a Hardening rule matched.
+    #[must_use]
+    pub fn hardening_headers(&self) -> Option<&[(String, String)]> {
+        match self {
+            Self::Hardening { headers, .. } => Some(headers),
+            _ => None,
+        }
+    }
+
     /// The blocking rule's name, if any.
     #[must_use]
     pub fn rule(&self) -> Option<&str> {
         match self {
-            Self::Block { rule, .. } => Some(rule),
+            Self::Block { rule, .. } | Self::Hardening { rule, .. } => Some(rule),
             Self::Allow => None,
         }
     }
@@ -403,6 +428,7 @@ struct CompiledRule {
     status: u16,
     body: String,
     action: WafAction,
+    headers: Vec<(String, String)>,
 }
 
 /// Compile one wirefilter expression against the shared scheme with the
@@ -491,6 +517,7 @@ impl WafRules {
                 status: rule.status,
                 body: rule.body.clone(),
                 action: rule.action,
+                headers: rule.headers.clone(),
             }));
         }
         Ok(Self {
@@ -547,12 +574,19 @@ impl WafRules {
                 Err(e) => (true, Some(e.to_string())),
             };
             if matched {
+                if compiled.action == WafAction::Hardening {
+                    return WafVerdict::Hardening {
+                        rule: compiled.name.clone(),
+                        headers: compiled.headers.clone(),
+                    };
+                }
                 let status = match compiled.action {
                     WafAction::Block => compiled.status,
                     // A defaulted Challenge status signals "503"; an
                     // explicitly configured status is honoured verbatim.
                     WafAction::Challenge if compiled.status == default_block_status() => 503,
                     WafAction::Challenge => compiled.status,
+                    WafAction::Hardening => compiled.status,
                 };
                 let body = match failure {
                     Some(reason) => format!("{}waf evaluation failed: {reason}\n", compiled.body),
@@ -606,6 +640,33 @@ mod tests {
     }
 
     #[test]
+    fn a_hardening_rule_yields_header_overrides_and_allows() {
+        let rule = WafRule {
+            name: "content-frame".to_owned(),
+            expression: r#"http.path contains "/content""#.to_owned(),
+            action: WafAction::Hardening,
+            headers: vec![("x-frame-options".to_owned(), String::new())],
+            ..Default::default()
+        };
+        let rules = WafRules::compile(&[rule]).unwrap();
+        let verdict = rules.evaluate(&request("GET", "/api/entry/1/content", "test"));
+        assert_eq!(
+            verdict,
+            WafVerdict::Hardening {
+                rule: "content-frame".to_owned(),
+                headers: vec![("x-frame-options".to_owned(), String::new())],
+            }
+        );
+        assert!(!verdict.is_blocked());
+        assert!(
+            rules
+                .evaluate(&request("GET", "/", "test"))
+                .hardening_headers()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn private_paths_are_blocked_even_with_no_rules() {
         // The built-in deny runs ahead of the configurable ruleset — an
         // empty WAF must still drop the node's private/admin faces.
@@ -633,7 +694,7 @@ mod tests {
     fn private_paths_are_blocked_before_a_configured_rule() {
         // Even an explicitly allow-ish ruleset cannot open a private path:
         // the built-in check precedes rule evaluation and stamps its own
-        // rule name in x-gateway-waf.
+        // rule name in x-qreta-waf.
         let rules = WafRules::compile(&[rule("allow-all", "http.path != \"\"")]).unwrap();
         let verdict = rules.evaluate(&request("GET", "/__private/anything", "curl/8"));
         assert_eq!(verdict.rule(), Some(PRIVATE_PATH_RULE));

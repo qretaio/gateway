@@ -147,7 +147,7 @@ async fn a_cr_rule_only_limits_its_own_namespace() {
         .await
         .unwrap();
     assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(blocked.headers()["x-gateway-rate"], "acme-limit");
+    assert_eq!(blocked.headers()["x-qreta-rate"], "acme-limit");
 
     // mgmt has no matching CR, so its requests keep passing.
     let mgmt = format!("http://{addr}/");

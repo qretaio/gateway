@@ -30,7 +30,7 @@ pub const RATE_LIMIT_PLURAL: &str = "ratelimits";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WafRuleEntry {
-    /// The rule's identity — stamped on a block (`x-gateway-waf`) so an
+    /// The rule's identity — stamped on a block (`x-qreta-waf`) so an
     /// operator can see which rule fired.
     pub name: String,
     /// The Wireshark-like wirefilter expression. Compiled once when the
@@ -45,6 +45,11 @@ pub struct WafRuleEntry {
     /// The body a block returns (default "blocked by the WAF\n").
     #[serde(default = "default_block_body")]
     pub body: String,
+    /// Response-header overrides when action is hardening.
+    /// A key with an empty value suppresses that header; a non-empty
+    /// value overrides the gateway default. Only named headers change.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
     /// A parked rule never runs (default true).
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -68,6 +73,7 @@ impl Default for WafRuleEntry {
             action: WafAction::default(),
             status: default_block_status(),
             body: default_block_body(),
+            headers: std::collections::BTreeMap::new(),
             enabled: default_enabled(),
         }
     }
@@ -113,7 +119,7 @@ pub enum RateLimitKeySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitEntry {
-    /// Rule identity — stamped on a 429 (`x-gateway-rate`).
+    /// Rule identity — stamped on a 429 (`x-qreta-rate`).
     pub name: String,
     /// Wirefilter selector (same fields as the WAF). Only requests whose
     /// fields match are counted. An empty expression matches everything.
@@ -215,5 +221,23 @@ mod tests {
         let entry: RateLimitEntry =
             serde_json::from_str(r#"{"name":"bad","match":"","limit":0,"windowSecs":60}"#).unwrap();
         assert!(entry.validate().is_err());
+    }
+
+    #[test]
+    fn a_hardening_wafrule_carries_header_overrides() {
+        let spec: WafRuleSpec = serde_json::from_str(
+            r#"{"rules":[{"name":"resonate-content","expression":"http.path contains \"/content\"","action":"hardening","headers":{"x-frame-options":"","referrer-policy":"no-referrer"}}]}"#,
+        )
+        .unwrap();
+        let entry = &spec.rules[0];
+        assert_eq!(entry.action, crate::waf::WafAction::Hardening);
+        assert_eq!(
+            entry.headers.get("x-frame-options").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            entry.headers.get("referrer-policy").map(String::as_str),
+            Some("no-referrer")
+        );
     }
 }

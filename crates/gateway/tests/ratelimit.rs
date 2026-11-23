@@ -145,7 +145,7 @@ async fn a_client_past_its_budget_gets_429_and_never_reaches_the_node() {
         .await
         .unwrap();
     assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(third.headers()["x-gateway-rate"], "per-client");
+    assert_eq!(third.headers()["x-qreta-rate"], "per-client");
     assert!(third.headers().contains_key("retry-after"));
     // Only the two allowed requests reached the backend.
     assert_eq!(hits.load(Ordering::SeqCst), 2);

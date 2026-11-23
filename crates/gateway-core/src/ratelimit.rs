@@ -26,7 +26,7 @@ use crate::crd::RateLimitKeySource;
 /// `/login` while the default bounds the client overall.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimitRule {
-    /// The rule's identity — stamped on a block (`x-gateway-rate`) so an
+    /// The rule's identity — stamped on a block (`x-qreta-rate`) so an
     /// operator can see which limit fired.
     pub name: String,
     /// Maximum requests in the window before blocking.

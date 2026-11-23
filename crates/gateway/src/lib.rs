@@ -5,7 +5,7 @@
 //! runtime workspace. The crate moved home into the kapi workspace
 //! 2026-11-16 (the wisolate-agnostic carve completed: the edge is now
 //! kapi.s gateway; the wire faces keep their names — `/__gateway/*` and
-//! `x-gateway-cache` are contracts with the node, not this crate's name).
+//! `x-qreta-cache` are contracts with the node, not this crate's name).
 //! The spawn arm (the kubelet) moved into the controller crate the same
 //! day (owner directive: the gateway's controller belongs with the k8s
 //! controllers) — `controller::spawn::Kubelet`, composed here unchanged.
