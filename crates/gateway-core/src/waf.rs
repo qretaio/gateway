@@ -85,7 +85,14 @@ const DENIED_PATH_SEGMENTS: &[&str] = &[
 /// Filename suffixes never served at the edge (private keys / certs).
 /// Matched on the LAST path segment only.
 const DENIED_FILE_SUFFIXES: &[&str] = &[
-    ".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".asc",
+    ".env",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".asc",
 ];
 
 /// True when `path` starts with one of the reserved private/admin
@@ -95,8 +102,7 @@ const DENIED_FILE_SUFFIXES: &[&str] = &[
 #[must_use]
 pub fn is_private_prefix(path: &str) -> bool {
     PRIVATE_PATH_PREFIXES.iter().any(|prefix| {
-        path.starts_with(prefix)
-            || path == prefix.strip_suffix('/').expect("prefix ends in /")
+        path.starts_with(prefix) || path == prefix.strip_suffix('/').expect("prefix ends in /")
     })
 }
 
@@ -124,8 +130,11 @@ pub fn is_secret_file_path(path: &str) -> bool {
 /// directory name (`.git/`, `.aws/`, `.ssh/`, ...), at any depth.
 #[must_use]
 pub fn has_secret_dir_segment(path: &str) -> bool {
-    path.split('/')
-        .any(|seg| DENIED_PATH_SEGMENTS.iter().any(|d| seg.eq_ignore_ascii_case(d)))
+    path.split('/').any(|seg| {
+        DENIED_PATH_SEGMENTS
+            .iter()
+            .any(|d| seg.eq_ignore_ascii_case(d))
+    })
 }
 
 /// The combined built-in deny: reserved admin prefixes, secret/env
@@ -639,7 +648,10 @@ mod tests {
         assert!(!is_private_path("/environment")); // not `env.*`
         assert!(!is_private_path("/api/envelope")); // not `env.*`
         let rules = WafRules::compile(&[]).unwrap();
-        assert_eq!(rules.evaluate(&request("GET", "/api/inbox", "curl/8")), WafVerdict::Allow);
+        assert_eq!(
+            rules.evaluate(&request("GET", "/api/inbox", "curl/8")),
+            WafVerdict::Allow
+        );
     }
 
     #[test]
@@ -647,20 +659,20 @@ mod tests {
         // The explicit shapes the operator asked for, plus deeper paths:
         // one-level-only matching would miss /a/b/.env.
         for path in [
-            "/.env",                  // root
-            "/app/.env",              // /*/.env
-            "/a/b/.env",              // deeper
-            "/config/app.env",        // /*/*.env
-            "/a/b/service.env",       // deeper *.env
-            "/env.local",             // /*/env.* (root)
-            "/foo/env.production",    // /*/env.*
-            "/foo/bar/env.json",      // deeper env.*
-            "/app/id_rsa",            // private key
-            "/static/server.pem",     // key-bearing cert
-            "/secrets.yaml",          // secret config
-            "/.git/config",           // VCS metadata dir
-            "/a/.aws/credentials",    // cloud credentials dir
-            "/x/.ssh/id_ed25519",     // ssh key
+            "/.env",               // root
+            "/app/.env",           // /*/.env
+            "/a/b/.env",           // deeper
+            "/config/app.env",     // /*/*.env
+            "/a/b/service.env",    // deeper *.env
+            "/env.local",          // /*/env.* (root)
+            "/foo/env.production", // /*/env.*
+            "/foo/bar/env.json",   // deeper env.*
+            "/app/id_rsa",         // private key
+            "/static/server.pem",  // key-bearing cert
+            "/secrets.yaml",       // secret config
+            "/.git/config",        // VCS metadata dir
+            "/a/.aws/credentials", // cloud credentials dir
+            "/x/.ssh/id_ed25519",  // ssh key
         ] {
             assert!(is_private_path(path), "{path} should be blocked");
         }

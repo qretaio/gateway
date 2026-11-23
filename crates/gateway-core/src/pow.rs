@@ -75,8 +75,8 @@ impl PowConfig {
 }
 
 fn tag(secret: &[u8], payload: &str) -> String {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret)
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
     mac.update(payload.as_bytes());
     let out = mac.finalize().into_bytes();
     hex(&out)

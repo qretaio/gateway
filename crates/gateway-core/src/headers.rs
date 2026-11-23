@@ -38,14 +38,24 @@ pub struct HardeningConfig {
     pub xss_protection: bool,
 }
 
-fn yes() -> bool { true }
-fn default_hsts() -> u64 { 31_536_000 } // 1 year
-fn default_referrer_policy() -> String { "strict-origin-when-cross-origin".to_owned() }
-fn default_frame_options() -> String { "DENY".to_owned() }
+fn yes() -> bool {
+    true
+}
+fn default_hsts() -> u64 {
+    31_536_000
+} // 1 year
+fn default_referrer_policy() -> String {
+    "strict-origin-when-cross-origin".to_owned()
+}
+fn default_frame_options() -> String {
+    "DENY".to_owned()
+}
 fn default_permissions_policy() -> String {
     "camera=(), microphone=(), geolocation=(), payment=()".to_owned()
 }
-fn default_csp() -> String { "default-src 'self'; base-uri 'none'; frame-ancestors 'none'".to_owned() }
+fn default_csp() -> String {
+    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'".to_owned()
+}
 
 impl Default for HardeningConfig {
     fn default() -> Self {
@@ -102,7 +112,10 @@ impl HardeningConfig {
             out.push(("permissions-policy", self.permissions_policy.clone()));
         }
         if !self.content_security_policy.is_empty() {
-            out.push(("content-security-policy", self.content_security_policy.clone()));
+            out.push((
+                "content-security-policy",
+                self.content_security_policy.clone(),
+            ));
         }
         if self.xss_protection {
             out.push(("x-xss-protection", "0".to_owned()));

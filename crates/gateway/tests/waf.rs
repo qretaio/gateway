@@ -455,7 +455,11 @@ async fn pow_challenge_is_issued_and_a_solution_bypasses_it() {
         .await
         .unwrap();
     assert_eq!(passed.status(), StatusCode::OK);
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "solved bot reached the node");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "solved bot reached the node"
+    );
 }
 
 /// Hardening headers are stamped on every response, including simple
@@ -473,7 +477,10 @@ async fn hardening_headers_are_stamped_on_every_response() {
         .await
         .unwrap();
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(resp.headers()["referrer-policy"], "strict-origin-when-cross-origin");
+    assert_eq!(
+        resp.headers()["referrer-policy"],
+        "strict-origin-when-cross-origin"
+    );
     assert_eq!(resp.headers()["x-frame-options"], "DENY");
     assert!(resp.headers().contains_key("strict-transport-security"));
     assert!(resp.headers().contains_key("content-security-policy"));

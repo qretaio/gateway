@@ -111,11 +111,8 @@ impl RateLimiter {
         };
         let window = Duration::from_secs(60);
         let now = Instant::now();
-        map.get(&bucket).is_some_and(|e| {
-            e.hits
-                .iter()
-                .any(|t| *t + window > now)
-        })
+        map.get(&bucket)
+            .is_some_and(|e| e.hits.iter().any(|t| *t + window > now))
     }
 
     /// Keep the map bounded: when it exceeds the cap, drop the

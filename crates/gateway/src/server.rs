@@ -240,6 +240,14 @@ impl Gateway {
         if let Some(ip) = peer_ip {
             headers.insert("x-forwarded-for".to_owned(), ip.to_string());
         }
+        // Behind a Cloudflare Tunnel the TCP peer is the tunnel's loopback
+        // origin (127.0.0.1) for EVERY visitor. Penalizing that IP would
+        // ban all users after one probe. Prefer the real visitor IP that
+        // Cloudflare supplies; fall back to the peer on direct dials.
+        let client_ip: Option<std::net::IpAddr> = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.parse().ok())
+            .or(peer_ip);
 
         // Verified-bot exemption FIRST: a peer that forward-confirms to an
         // allowlisted crawler skips both the rate limiter and the WAF and
@@ -263,14 +271,15 @@ impl Gateway {
             .as_millis()
             .min(i64::MAX as u128) as i64;
         let pow_solved = self.config.pow.enabled()
-            && headers
-                .get("cookie")
-                .is_some_and(|cookies| {
-                    cookies.split(';').filter_map(|kv| kv.trim().split_once('=')).any(|(k, v)| {
+            && headers.get("cookie").is_some_and(|cookies| {
+                cookies
+                    .split(';')
+                    .filter_map(|kv| kv.trim().split_once('='))
+                    .any(|(k, v)| {
                         k == self.config.pow.cookie
                             && gateway_core::pow::verify(&self.config.pow, v, now_ms)
                     })
-                });
+            });
 
         // One request view, shared by the WAF and every rate-limit
         // selector. The peer is authoritative; the XFF header was just
@@ -283,7 +292,7 @@ impl Gateway {
             user_agent: headers.get("user-agent").map_or("", String::as_str),
             referer: headers.get("referer").map_or("", String::as_str),
             content_type: headers.get("content-type").map_or("", String::as_str),
-            client_ip: peer_ip,
+            client_ip,
             client_port: peer.map_or(0, |s| i64::from(s.port())),
             tls: parts
                 .uri
@@ -324,7 +333,7 @@ impl Gateway {
         // enforcement half. Verified bots are exempt from the penalty (the
         // WAF's built-in private-path drop still applies to them).
         if !verified_bot
-            && let Some(ip) = peer_ip
+            && let Some(ip) = client_ip
             && self.limiter.is_private_path_penalized(ip)
         {
             // Incident: a previously-penalized IP attempted to reach the
@@ -351,7 +360,7 @@ impl Gateway {
         // never reaches an expensive rule or a backend. Namespace-local CR
         // rules apply only to the resolved route's namespace; static TOML
         // rules are global. Verified bots are exempt.
-        if !verified_bot && let Some(ip) = peer_ip {
+        if !verified_bot && let Some(ip) = client_ip {
             let rate_rules = self
                 .rate_rules
                 .rules(&watched_rates, watched_rates_gen)
@@ -439,7 +448,7 @@ impl Gateway {
             // the check at the top of the pipeline. The block itself is
             // returned regardless of the penalty.
             if rule == gateway_core::waf::PRIVATE_PATH_RULE
-                && let Some(ip) = peer_ip
+                && let Some(ip) = client_ip
             {
                 self.limiter.penalize_private_path(ip);
                 tracing::warn!(
@@ -644,9 +653,7 @@ impl Gateway {
                         "set-cookie",
                         format!(
                             "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-                            self.config.pow.cookie,
-                            solution,
-                            self.config.pow.verify_ttl_secs
+                            self.config.pow.cookie, solution, self.config.pow.verify_ttl_secs
                         ),
                     )
                     .header("cache-control", "no-store")
@@ -883,7 +890,8 @@ fn plain(status: u16, body: &str) -> Response {
 /// the cookie-setting via a form POST to `/__gateway/pow` (a gateway face)
 /// so the cookie is `HttpOnly` and not readable by JS.
 fn pow_challenge_page(challenge: &str, cookie: &str, difficulty: u8) -> String {
-    format!(r#"<!doctype html><html><head><meta charset="utf-8"><title>Verifying…</title></head>
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>Verifying…</title></head>
 <body><p>Verifying your browser…</p>
 <form id="f" method="post" action="/__gateway/pow">
 <input type="hidden" name="solution" id="s"><input type="hidden" name="cookie" id="c" value="{cookie}">
@@ -911,7 +919,8 @@ function zeros(bytes) {{ let n=0; for (const b of bytes) {{ if (b===0) {{ n+=8; 
   }}
   document.body.textContent = 'Verification failed — please reload.';
 }})();
-</script></body></html>"#)
+</script></body></html>"#
+    )
 }
 
 /// Compare two byte strings without early exit on the first difference.

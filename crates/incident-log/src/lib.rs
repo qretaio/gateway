@@ -128,12 +128,33 @@ impl IncidentSink for LocalDirSink {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let dir = self.root.join(kind);
-            tokio::fs::create_dir_all(&dir).await.context("incident dir")?;
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .context("incident dir")?;
             let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = dir.join(format!("{first_ts:020}-gateway-{seq}.parquet"));
-            tokio::fs::write(&path, bytes).await.context("incident segment write")?;
+            tokio::fs::write(&path, bytes)
+                .await
+                .context("incident segment write")?;
             Ok(())
         })
+    }
+}
+
+/// A no-op sink for when no destination is configured. Logging stays
+/// best-effort: incidents are dropped without a boot failure or a noisy
+/// "not a directory" error on every flush.
+pub struct DiscardSink;
+
+impl IncidentSink for DiscardSink {
+    fn write<'a>(
+        &'a self,
+        _org: &'a str,
+        _kind: &'a str,
+        _first_ts: i64,
+        _bytes: &'a [u8],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 

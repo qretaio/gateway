@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use gateway::config::GatewayConfig;
-use incident_log::{HttpSink, IncidentLayer, IncidentSink, LocalDirSink, WriterConfig, run_writer};
+use incident_log::{
+    DiscardSink, HttpSink, IncidentLayer, IncidentSink, LocalDirSink, WriterConfig, run_writer,
+};
 use tokio::sync::mpsc;
 use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt;
@@ -56,21 +58,19 @@ fn main() -> anyhow::Result<()> {
         // leaves the layer capturing into an unread channel — no boot
         // failure, no request-path cost beyond a try_send.
         let (tx, rx) = mpsc::channel(4096);
-        let instance = std::env::var("GATEWAY_INSTANCE")
-            .unwrap_or_else(|_| "gateway-local".to_owned());
+        let instance =
+            std::env::var("GATEWAY_INSTANCE").unwrap_or_else(|_| "gateway-local".to_owned());
         let (sink, http_json): (Arc<dyn IncidentSink>, bool) =
             match std::env::var("GATEWAY_INCIDENT_DIR") {
                 Ok(dir) => (Arc::new(LocalDirSink::new(dir)), false),
                 Err(_) => match std::env::var("GATEWAY_INCIDENT_URL") {
                     Ok(url) => {
-                        let bearer = std::env::var("GATEWAY_INCIDENT_BEARER")
-                            .unwrap_or_default();
+                        let bearer = std::env::var("GATEWAY_INCIDENT_BEARER").unwrap_or_default();
                         (Arc::new(HttpSink::new(url, bearer)), true)
                     }
                     Err(_) => {
-                        // No sink configured: a discard sink keeps the
-                        // layer valid without failing boot.
-                        (Arc::new(LocalDirSink::new("/dev/null")), false)
+                        // No sink configured: drop incidents quietly.
+                        (Arc::new(DiscardSink), false)
                     }
                 },
             };
