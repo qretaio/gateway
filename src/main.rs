@@ -6,18 +6,8 @@
 //! the drain discipline. The route table rides the kapi watch client
 //! named in `[kapi]`; a config without it is a boot refusal.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use clap::Parser;
 use gateway::config::GatewayConfig;
-use incident_log::{
-    DiscardSink, HttpSink, IncidentLayer, IncidentSink, LocalDirSink, WriterConfig, run_writer,
-};
-use tokio::sync::mpsc;
-use tracing_subscriber::Layer as _;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +21,19 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Structured logging only. Incident sites emit `tracing::warn!` with
+    // `target: "incident"` and named fields (client_ip, host, path, rule,
+    // action); `fmt().json()` writes them to stdout as JSON lines for the
+    // platform's log collector. No producer-side sync, channels, or
+    // parquet in this binary — the node owns the parquet log store.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let cli = Cli::parse();
     let config = GatewayConfig::load(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
     if config.kapi.is_none() {
@@ -49,49 +52,5 @@ fn main() -> anyhow::Result<()> {
         .thread_stack_size(256 * 1024)
         .enable_all()
         .build()?;
-
-    rt.block_on(async move {
-        // Incident logging as a tracing layer. The sink is configured by
-        // env: GATEWAY_INCIDENT_DIR writes parquet locally; otherwise
-        // GATEWAY_INCIDENT_URL (+ bearer) POSTs JSON to the node's
-        // private log-write face. Best-effort: a missing config simply
-        // leaves the layer capturing into an unread channel — no boot
-        // failure, no request-path cost beyond a try_send.
-        let (tx, rx) = mpsc::channel(4096);
-        let instance =
-            std::env::var("GATEWAY_INSTANCE").unwrap_or_else(|_| "gateway-local".to_owned());
-        let (sink, http_json): (Arc<dyn IncidentSink>, bool) =
-            match std::env::var("GATEWAY_INCIDENT_DIR") {
-                Ok(dir) => (Arc::new(LocalDirSink::new(dir)), false),
-                Err(_) => match std::env::var("GATEWAY_INCIDENT_URL") {
-                    Ok(url) => {
-                        let bearer = std::env::var("GATEWAY_INCIDENT_BEARER").unwrap_or_default();
-                        (Arc::new(HttpSink::new(url, bearer)), true)
-                    }
-                    Err(_) => {
-                        // No sink configured: drop incidents quietly.
-                        (Arc::new(DiscardSink), false)
-                    }
-                },
-            };
-
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer().with_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
-            )
-            .with(IncidentLayer::new(tx, instance))
-            .init();
-
-        let writer_cfg = WriterConfig {
-            batch_size: 64,
-            flush_every: Duration::from_secs(5),
-            http_json,
-        };
-        tokio::spawn(run_writer(rx, sink, writer_cfg));
-
-        gateway::entry::run(config, None).await
-    })
+    rt.block_on(gateway::entry::run(config, None))
 }

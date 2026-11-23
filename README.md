@@ -33,17 +33,13 @@ cargo clippy --all-targets
   context and runs the closure trees (~134 ns for four rules). First
   match blocks (the node never sees it) and stamps `x-gateway-waf: <rule>`.
   Bad expressions are a boot refusal. No rules = the configurable layer is inert, **but** the reserved private/admin paths `/__private/` and `/__internal/` (and their bare roots) are dropped unconditionally by a built-in check — these are the node's admin-channel faces and must never be reachable at the public edge. The deny runs before the ruleset, returns 404, and stamps `x-gateway-waf: reserved-private-path`.
- - **Incident logger (tracing layer)**: private/admin path probes and
-   rate-limit penalties emit structured `target: "incident"` tracing
-   events. `incident-log`'s `IncidentLayer` captures them and its writer
-   batches them into org-audit **parquet** (`host.incidents` kind, the
-   same 7-column shape the node's log store writes). Configure the sink
-   in the process env: `GATEWAY_INCIDENT_DIR` writes segments to a local
-   dir; `GATEWAY_INCIDENT_URL` (+ optional `GATEWAY_INCIDENT_BEARER`)
-   POSTs JSON to the node's private log-write face. `GATEWAY_INSTANCE`
-   names this gateway in the metadata. Logging is best-effort — a full
-   channel drops the newest incident; a sink failure is never returned
-   to the request path.
+ - **Incident logging (plain tracing)**: private/admin path probes and
+   rate-limit penalties emit structured `tracing::warn!` events with
+   `target: "incident"` and named fields (`client_ip`, `host`, `path`,
+   `rule`, `action`). `main.rs` installs `tracing_subscriber::fmt().json()`
+   so these land as JSON lines on stdout for the platform's collector.
+   No producer-side sync, channels, or parquet code in this binary — that
+   keeps the gateway small; the node owns the parquet log store.
  - **Proof-of-work bot challenges**: a WAF rule with `action = "challenge"`
    issues an HMAC-signed SHA-256 puzzle (HSSL, `gateway-core::pow`) when
    `[pow] secret` is set. A tiny inline JS page solves it in the browser,
@@ -146,7 +142,7 @@ nosniff = true
 referrer_policy = "strict-origin-when-cross-origin"
 frame_options = "DENY"
 permissions_policy = "camera=(), microphone=(), geolocation=(), payment=()"
-content_security_policy = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
 # xss_protection = false   # legacy; modern CSP supersedes it
 ```
 

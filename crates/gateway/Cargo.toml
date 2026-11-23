@@ -13,8 +13,7 @@ gateway-core = { path = "../gateway-core" }
 # structurally before the barrier, the in-flight count is the receiver
 # count.
 graceful-handover = { path = "../graceful-handover" }
-# Block/penalty sites emit `target: "incident"` tracing events; the
-# gateway-bin process registers the incident-log layer that captures them.
+# Block/penalty sites emit `target: "incident"` structured tracing events.
 tracing = "0.1"
 # The serving face (the same stack the node serves with).
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }

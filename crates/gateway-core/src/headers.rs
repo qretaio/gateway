@@ -54,7 +54,12 @@ fn default_permissions_policy() -> String {
     "camera=(), microphone=(), geolocation=(), payment=()".to_owned()
 }
 fn default_csp() -> String {
-    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'".to_owned()
+    // SSR apps (Astro/Preact) ship inline style attributes for dynamic
+    // layout (widths, transforms, theme colors). Allow inline styles;
+    // scripts stay strict ('self' only). Nonces/hashes on every dynamic
+    // attribute are impractical here.
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+        .to_owned()
 }
 
 impl Default for HardeningConfig {
