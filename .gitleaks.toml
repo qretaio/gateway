@@ -1,0 +1,92 @@
+# gitleaks configuration for the gateway repo.
+#
+# Runs in CI on every push and locally via scripts/gitleaks-scan.sh (also
+# wired as a pre-commit hook). Default rules are extended with the
+# qreta-specific credential shapes this fleet actually uses.
+#
+# Install: brew install gitleaks  (or see https://github.com/gitleaks/gitleaks)
+
+title = "gateway secret scan"
+
+[extend]
+useDefault = true
+
+# Allowlist for fixtures: test files use obviously-fake values that match
+# generic high-entropy patterns. Keep entries narrow (path + rule) so a real
+# secret in a test file is still caught.
+[allowlist]
+description = "Test fixtures and documentation examples only"
+paths = [
+  '''(?i)(^|/)(test|tests|testdata|fixtures)/''',
+  '''(^|/)\.env\.example$''',
+  '''(^|/)README\.md$''',
+  '''(^|/)docs/''',
+]
+regexes = [
+  '''REPLACE_ME''',
+  '''(example|dummy|fake|test)[-_]?(token|secret|key|password)''',
+]
+stopwords = [
+  "example",
+  "placeholder",
+  "your-",
+]
+
+# --- qreta-specific rules ----------------------------------------------------
+
+[[rules]]
+id = "qreta-biscuit-token"
+description = "qreta Biscuit bearer (provisionToken, CLI logins, IdP mints)"
+# Biscuit v4 tokens are long base64url strings. The fleet's tokens start
+# with the protobuf preamble "CCQ" (or "CCQSl..." for the provision token).
+# Require >= 100 chars to keep ordinary base64 blobs out of the net.
+regex = '''\b[A-Za-z0-9_-]{100,}={0,2}\b'''
+entropy = 4.0
+keywords = ["biscuit", "token", "provisionToken", "bearer", "access_token"]
+[rules.allowlist]
+regexes = [
+  '''[A-Za-z0-9+/]{20,}={0,2}''',  # base64 config blobs already covered by default rules
+]
+
+[[rules]]
+id = "qreta-provision-token-prefix"
+description = "Hard-coded Biscuit provision token (CCQ... preamble)"
+regex = '''(?i)(provision[_-]?token|provisionToken)\s*[:=]\s*["']?CCQ[A-Za-z0-9_-]{80,}'''
+keywords = ["provisionToken", "provision_token", "provision-token"]
+
+[[rules]]
+id = "qreta-idp-mint-secret"
+description = "Node-held IdP mint secret / hash"
+regex = '''(?i)(node[_-]?mint[_-]?secret|idp[_-]?node[_-]?mint[_-]?secret[_-]?hash)\s*[:=]\s*["'][^"'$\n]{8,}["']'''
+keywords = ["mint", "nodeMintSecret", "IDP_NODE_MINT_SECRET"]
+
+[[rules]]
+id = "gateway-cache-push-token"
+description = "Gateway cache-push bearer in config or env"
+regex = '''(?i)(cache[_-]?push[_-]?token|CACHE_PUSH_TOKEN)\s*[:=]\s*["'][^"'$\n]{8,}["']'''
+keywords = ["cache_push", "cache-push", "CACHE_PUSH_TOKEN"]
+
+# --- exposed credential/config FILES (content-agnostic) ----------------------
+# A file named like a secret store is suspicious even if its content is not
+# yet high-entropy (empty/templated secrets still reveal layout). These
+# rules catch the filename so an accidental `git add` is refused.
+[[rules]]
+id = "qreta-exposed-env-file"
+description = "An env/secret file name staged for commit (the WAF also drops these paths)"
+regex = '''(?i)(^|/)\.env(\.[a-z0-9_-]+)?$|(^|/)env\.[a-z0-9_-]+$|(^|/)[a-z0-9_-]+\.env$'''
+path = '''(?i)(\.env(\.[a-z0-9_-]+)?|env\.[a-z0-9_-]+|[a-z0-9_-]+\.env)$'''
+keywords = [".env", "env.local", "env.production"]
+[rules.allowlist]
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)README\.md$''',
+]
+
+[[rules]]
+id = "qreta-exposed-secret-file"
+description = "Private key / credential / secret config file name"
+regex = '''(?i)(^|/)(id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials|\.htpasswd|\.netrc|\.npmrc|\.git-credentials|secrets\.(yaml|yml|json|toml))$'''
+path = '''(?i)(id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials|\.htpasswd|\.netrc|\.npmrc|\.git-credentials|secrets\.(yaml|yml|json|toml))$'''
+keywords = ["id_rsa", "credentials", "secrets", ".htpasswd", ".netrc"]
+
+# (default rules already cover AWS/GitHub/Stripe/etc. keys)

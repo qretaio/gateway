@@ -2,11 +2,17 @@
 name = "gateway-core"
 version = "0.1.0"
 edition = "2024"
-description = "The gateway layer pure laws: the host route matcher, the static-asset response law + its AssetSpec, the edge cache store, the inbound trim. Zero I/O, forbid(unsafe)."
+description = "The gateway layer pure laws: host route matcher, asset response law, edge cache store, inbound trim, WAF filter law, sliding-window rate-limit decision, verified-bot FCrDNS law. Zero I/O, forbid(unsafe)."
 
 [dependencies]
 # The AssetSpec a row's JSON parses into (serde derive on the type).
 serde = { version = "1", features = ["derive"] }
+# Proof-of-work challenge law: HMAC-signed challenges, SHA-256 work,
+# constant-time tag comparison. Pure computation — no I/O.
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+base64 = "0.23"
 # The asset law builds http::Response values (the wire shape both the
 # node's serving path and the future edge binary share).
 http = "1"

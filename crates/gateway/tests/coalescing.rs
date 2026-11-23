@@ -105,6 +105,10 @@ fn gateway_config(kapi: std::net::SocketAddr, node: std::net::SocketAddr) -> Gat
         deploy: None,
         sandbox: Default::default(),
         waf: Default::default(),
+        ratelimit: Default::default(),
+        verified_bots: Default::default(),
+        pow: Default::default(),
+        hardening: Default::default(),
     }
 }
 

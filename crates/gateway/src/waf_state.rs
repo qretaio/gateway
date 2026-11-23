@@ -18,6 +18,11 @@ use gateway_core::waf::{WafRule, WafRules};
 pub struct WafState {
     /// The rules from the gateway TOML config, always first in order.
     static_rules: Arc<[WafRule]>,
+    /// The static-only compiled ruleset — used for verified bots, which
+    /// are exempt from configurable (TOML + watched-CR) rules but still
+    /// subject to the built-in private-path deny. Compiled once at boot
+    /// so a bot request never recompiles the live (CR-folded) set.
+    static_only: Arc<WafRules>,
     /// The cached compiled ruleset. `RwLock` because a watch delta
     /// swaps it; reads take the shared lock and clone the `Arc`.
     compiled: std::sync::RwLock<Arc<WafRules>>,
@@ -35,14 +40,34 @@ impl WafState {
     /// boot; the first request after the watch seeds its generation
     /// folds the CRs in.
     pub fn new(static_rules: &[WafRule]) -> Self {
-        let compiled =
-            WafRules::compile(static_rules).expect("the TOML rules were validated at config load");
+        let compiled = Arc::new(
+            WafRules::compile(static_rules).expect("the TOML rules were validated at config load"),
+        );
         Self {
             static_rules: static_rules.to_vec().into(),
-            compiled: std::sync::RwLock::new(Arc::new(compiled)),
+            static_only: Arc::clone(&compiled),
+            compiled: std::sync::RwLock::new(compiled),
             generation: AtomicU64::new(0),
             attempted: AtomicU64::new(0),
         }
+    }
+
+    /// The built-in-deny-only ruleset: NO configurable rules at all, so
+    /// even TOML `Challenge`/`Block` rules are skipped. Used for clients
+    /// that proved their humanity via PoW (and for verified bots) — they
+    /// still cannot reach private/admin paths (that deny is in every set).
+    #[must_use]
+    pub fn builtin_only(&self) -> Arc<WafRules> {
+        static BUILTIN: std::sync::LazyLock<Arc<WafRules>> =
+            std::sync::LazyLock::new(|| Arc::new(WafRules::compile(&[]).expect("empty ruleset")));
+        Arc::clone(&BUILTIN)
+    }
+
+    /// The static-only ruleset (TOML rules, no watched CRs). Retained for
+    /// callers that want TOML rules but not dynamic CRs.
+    #[must_use]
+    pub fn static_rules(&self) -> Arc<WafRules> {
+        Arc::clone(&self.static_only)
     }
 
     /// The current compiled ruleset. When `watched_generation` differs

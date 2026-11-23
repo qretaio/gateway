@@ -13,6 +13,8 @@
 //! * [`cache`] — the edge cache store (edge.spec FR-006): per-app sealed scopes, volatile, TTL-led.
 //! * [`trim`] — the inbound trim law (edge.spec FR-008): client `x-qreta-*` stripped first.
 //! * [`waf`] — the WAF filter law: Cloudflare wirefilter expressions over a request snapshot, first match blocks.
+//! * [`ratelimit`] — the sliding-window rate-limit law (pure decision over timestamps).
+//! * [`verified_bot`] — the forward-confirmed reverse-DNS verified-bot law.
 //! * [`crd`] — the wire types for the gateway's own typed custom resources (`gateway.qreta.io/v1alpha1`).
 
 #![forbid(unsafe_code)]
@@ -20,7 +22,11 @@
 pub mod assets;
 pub mod cache;
 pub mod crd;
+pub mod headers;
+pub mod pow;
 pub mod public_assets;
+pub mod ratelimit;
 pub mod routes;
 pub mod trim;
+pub mod verified_bot;
 pub mod waf;

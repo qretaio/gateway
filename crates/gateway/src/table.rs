@@ -110,6 +110,10 @@ pub enum Family {
     /// The CR set is the dynamic half of the WAF; the TOML `[[waf.rules]]`
     /// section is the static half (both fold into one ruleset).
     WafRules,
+    /// Typed RateLimit CRs (gateway.qreta.io): namespace-local rate limits,
+    /// each rule a wirefilter selector + dynamic group key + per-IP window.
+    /// Watched like WafRule; folded into the live compiled ruleset.
+    RateLimits,
 }
 
 impl Family {
@@ -123,6 +127,7 @@ impl Family {
             Self::Secrets => "secrets",
             Self::PublicAssets => "publicassets",
             Self::WafRules => "wafrules",
+            Self::RateLimits => "ratelimits",
         }
     }
 
@@ -139,6 +144,11 @@ impl Family {
                 "/apis/{}/{}",
                 gateway_core::crd::GROUP_VERSION,
                 Self::WafRules.plural()
+            ),
+            Self::RateLimits => format!(
+                "/apis/{}/{}",
+                gateway_core::crd::GROUP_VERSION,
+                Self::RateLimits.plural()
             ),
             other => format!("/apis/kapi.qreta.io/v1alpha1/{}", other.plural()),
         }
@@ -235,6 +245,12 @@ pub struct Table {
     /// it against its last compile and recompiles only when the CR set
     /// actually changed — no work on the hot path when rules are static.
     waf_rules_generation: u64,
+    /// (namespace, name) -> a RateLimit CR's ordered rules. Keyed by the
+    /// CR's metadata so a delta is a single map edit; a rule's namespace
+    /// is the scope in which it applies (the served route's namespace).
+    rate_limits: BTreeMap<(String, String), Vec<gateway_core::crd::RateLimitEntry>>,
+    /// Bumped on every RateLimits family delta (generation-gated like WAF).
+    rate_limits_generation: u64,
 }
 
 /// The gateway's view of a PublicAssets CR: the OCI/volume source, the
@@ -331,6 +347,9 @@ impl Table {
         if family == Family::WafRules {
             self.waf_rules_generation = self.waf_rules_generation.wrapping_add(1);
         }
+        if family == Family::RateLimits {
+            self.rate_limits_generation = self.rate_limits_generation.wrapping_add(1);
+        }
     }
 
     /// Replace one family wholesale (the re-list law: the informer
@@ -350,6 +369,7 @@ impl Table {
             Family::Secrets => self.secrets.clear(),
             Family::PublicAssets => self.public_assets.clear(),
             Family::WafRules => self.waf_rules.clear(),
+            Family::RateLimits => self.rate_limits.clear(),
             Family::Kapinodes => return,
         }
         for item in items {
@@ -360,6 +380,9 @@ impl Table {
         }
         if family == Family::WafRules {
             self.waf_rules_generation = self.waf_rules_generation.wrapping_add(1);
+        }
+        if family == Family::RateLimits {
+            self.rate_limits_generation = self.rate_limits_generation.wrapping_add(1);
         }
     }
 
@@ -410,6 +433,12 @@ impl Table {
                 };
                 self.waf_rules.insert((namespace, name), rules);
             }
+            Family::RateLimits => {
+                let Some((namespace, name, rules)) = rate_limit_row(object) else {
+                    return;
+                };
+                self.rate_limits.insert((namespace, name), rules);
+            }
         }
     }
 
@@ -452,6 +481,11 @@ impl Table {
                     self.waf_rules.remove(&(namespace, name));
                 }
             }
+            Family::RateLimits => {
+                if let Some((namespace, name, _)) = rate_limit_row(object) {
+                    self.rate_limits.remove(&(namespace, name));
+                }
+            }
         }
     }
 
@@ -481,6 +515,34 @@ impl Table {
                 status: r.status,
                 body: r.body.clone(),
                 enabled: r.enabled,
+            })
+            .collect()
+    }
+
+    /// The RateLimits generation. Bumped on every RateLimits family delta.
+    #[must_use]
+    pub fn rate_limits_generation(&self) -> u64 {
+        self.rate_limits_generation
+    }
+
+    /// The watched `RateLimit` CR rules, grouped by namespace. BTreeMap
+    /// order makes the compile order deterministic; within a CR the
+    /// spec's order is kept. Blank rule names are skipped (an audit header
+    /// needs an identity), and invalid numeric rules are skipped at the
+    /// row parse seam so one bad CR cannot poison the set.
+    #[must_use]
+    pub fn rate_limits(&self) -> Vec<(String, Vec<gateway_core::crd::RateLimitEntry>)> {
+        self.rate_limits
+            .iter()
+            .map(|((namespace, _), rules)| {
+                (
+                    namespace.clone(),
+                    rules
+                        .iter()
+                        .filter(|r| !r.name.is_empty() && r.validate().is_ok())
+                        .cloned()
+                        .collect(),
+                )
             })
             .collect()
     }
@@ -771,6 +833,39 @@ fn waf_rule_row(
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
     let spec: gateway_core::crd::WafRuleSpec =
         serde_json::from_value(object.get("spec")?.clone()).ok()?;
+    // A single CR carrying more rules than the WAF's compile cap is
+    // rejected at the watch seam: keep the last-good ruleset rather than
+    // letting one oversized row poison the whole combined set.
+    if spec.rules.len() > gateway_core::waf::MAX_RULES {
+        eprintln!(
+            "[gateway] WafRule CR {namespace}/{name} carries {} rules (cap {}); ignored",
+            spec.rules.len(),
+            gateway_core::waf::MAX_RULES
+        );
+        return None;
+    }
+    Some((namespace, name, spec.rules))
+}
+
+/// A typed RateLimit CR -> (namespace, name, ordered rules). A malformed
+/// spec contributes nothing — the kapi controller marks it not-ready and
+/// the gateway keeps its last-good ruleset. Numeric fields and the rule
+/// cap are validated here; selectors are compiled on the recompile seam.
+fn rate_limit_row(
+    object: &serde_json::Value,
+) -> Option<(String, String, Vec<gateway_core::crd::RateLimitEntry>)> {
+    let namespace = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
+    let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
+    let spec: gateway_core::crd::RateLimitSpec =
+        serde_json::from_value(object.get("spec")?.clone()).ok()?;
+    if spec.rules.len() > gateway_core::waf::MAX_RULES
+        || spec.rules.iter().any(|r| r.validate().is_err())
+    {
+        eprintln!(
+            "[gateway] RateLimit CR {namespace}/{name} has invalid or oversized rules; ignored"
+        );
+        return None;
+    }
     Some((namespace, name, spec.rules))
 }
 

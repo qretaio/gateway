@@ -32,7 +32,44 @@ cargo clippy --all-targets
   (`Arc<Filter>` per rule); the request path only builds an execution
   context and runs the closure trees (~134 ns for four rules). First
   match blocks (the node never sees it) and stamps `x-gateway-waf: <rule>`.
-  Bad expressions are a boot refusal. No rules = the layer is inert.
+  Bad expressions are a boot refusal. No rules = the configurable layer is inert, **but** the reserved private/admin paths `/__private/` and `/__internal/` (and their bare roots) are dropped unconditionally by a built-in check — these are the node's admin-channel faces and must never be reachable at the public edge. The deny runs before the ruleset, returns 404, and stamps `x-gateway-waf: reserved-private-path`.
+ - **Incident logger (tracing layer)**: private/admin path probes and
+   rate-limit penalties emit structured `target: "incident"` tracing
+   events. `incident-log`'s `IncidentLayer` captures them and its writer
+   batches them into org-audit **parquet** (`host.incidents` kind, the
+   same 7-column shape the node's log store writes). Configure the sink
+   in the process env: `GATEWAY_INCIDENT_DIR` writes segments to a local
+   dir; `GATEWAY_INCIDENT_URL` (+ optional `GATEWAY_INCIDENT_BEARER`)
+   POSTs JSON to the node's private log-write face. `GATEWAY_INSTANCE`
+   names this gateway in the metadata. Logging is best-effort — a full
+   channel drops the newest incident; a sink failure is never returned
+   to the request path.
+ - **Proof-of-work bot challenges**: a WAF rule with `action = "challenge"`
+   issues an HMAC-signed SHA-256 puzzle (HSSL, `gateway-core::pow`) when
+   `[pow] secret` is set. A tiny inline JS page solves it in the browser,
+   POSTs the solution to `/__gateway/pow`, and receives an HTTPOnly cookie;
+   subsequent requests carrying a valid solution skip configurable WAF
+   rules (built-in private/secret-path denies still apply). With no secret,
+   challenge rules answer 503 (honest "not served").
+ - **Response hardening**: `[hardening]` stamps HSTS, `X-Content-Type-Options:
+   nosniff`, `Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`, and
+   a default CSP on **every** response (including blocks, cached answers,
+   and proxied streams) — applied centrally so no early-return path skips it.
+ - **Rate limits** with bounded sliding-window counters ahead of the WAF:
+  `[[ratelimit.rules]]` bound a client (optionally per route). The first
+  rule past its budget answers 429 with `Retry-After` and
+  `x-gateway-rate: <rule>`; a blocked hit is not recorded, so it cannot
+  extend its own ban. The counter map is capped and LRU-evicted, so a
+  spray of source IPs cannot grow it without limit. No rules = inert.
+  Limits also arrive as watched, namespace-local `RateLimit` CRs whose
+  wirefilter selectors pick the requests and whose keys may include a
+  header value (split one client's budget by tenant).
+- **Verified bots**: with `[verified_bots] enabled = true`, a peer that
+  forward-confirms (FCrDNS) to a hostname ending in `allowed_suffixes`
+  (e.g. `.googlebot.com`) is exempt from both WAF and rate limits and goes
+  straight to routing. PTR + forward A/AAAA lookups run under a timeout
+  with a bounded, TTL'd per-IP cache; failures time out OPEN (no
+  exemption). The peer IP comes from the TCP connection, never a header.
 - Boots under the drain discipline (graceful-handover): converge the
   table, bind under SO_REUSEPORT, drain in-flight requests on SIGTERM.
 - Self-confines with seatlock when `[sandbox] enabled = true`.
@@ -58,9 +95,69 @@ enabled = false
 ```
 
 Fields: `http.method`, `http.host`, `http.path`, `http.query`,
-`http.ua`, `http.referer`, `http.content_type`, `ip.addr`, `client.port`,
-`tls`. Operators (wirefilter 0.6): `==`, `!=`, ordering, `contains`,
-`matches`, `in {…}`, `&`, and boolean `and`/`or`/`not`.
+`http.ua`, `http.referer`, `http.content_type`, `ip.addr`,
+`ip.known` (false for the 0.0.0.0 unknown-client sentinel — gate inverted
+IP rules on it, e.g. `ip.known and not ip.addr in {…}`), `client.port`,
+`tls`. Operators (wirefilter 0.7): `==`, `!=`, ordering, `contains`,
+`matches`, `in {…}`, `&`, boolean `and`/`or`/`not`, and `wildcard`.
+An enabled ruleset is capped (512 rules); regex and wildcard expressions
+carry explicit compile-size/star caps.
+
+## Rate limit + verified bot config example
+
+```toml
+[[ratelimit.rules]]
+name = "global"
+limit = 120
+window_secs = 60
+
+[[ratelimit.rules]]
+name = "login"
+limit = 5
+window_secs = 60
+per_route = true          # key on client IP + method + host + path
+
+[verified_bots]
+enabled = true
+allowed_suffixes = [".googlebot.com", ".google.com", ".bing.com"]
+cache_ttl_secs = 600      # per-IP verification cache
+timeout_ms = 1500         # DNS lookup timeout (fail-open)
+cache_max_entries = 4096
+```
+
+A rate-limited client never reaches a rule or the backend; a verified bot
+skips both layers. Both are validated at config load — a zero
+limit/window or an enabled bot list with no suffixes is a boot refusal.
+
+## PoW + hardening config example
+
+```toml
+[pow]
+secret = "replace-with-a-random-secret"   # empty = challenges inert (503)
+difficulty = 16        # leading zero bits of SHA256 (1..=32)
+ttl_secs = 60          # puzzle lifetime
+verify_ttl_secs = 3600 # solved-cookie trust window
+cookie = "__gateway_pow"
+
+[hardening]
+hsts_max_age = 31536000
+hsts_include_subdomains = true
+nosniff = true
+referrer_policy = "strict-origin-when-cross-origin"
+frame_options = "DENY"
+permissions_policy = "camera=(), microphone=(), geolocation=(), payment=()"
+content_security_policy = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+# xss_protection = false   # legacy; modern CSP supersedes it
+```
+
+To issue challenges, pair a `challenge` WAF rule with `[pow]`:
+
+```toml
+[[waf.rules]]
+name = "bot-check"
+expression = 'http.ua contains "bot"'
+action = "challenge"
+```
 
 ## WafRule CRD (watched, dynamic rules)
 
@@ -92,7 +189,50 @@ A CR with no `spec.rules` is inert. The wire types live in
 `gateway-core::crd` (`WafRuleSpec`, `WafRuleEntry`, `WafRuleStatus`);
 the gateway's `WafRule` family in `table.rs` parses and tracks them.
 
-Deployment prerequisite: the `WafRule` CRD must be registered in kapi
+## RateLimit CRD (watched, namespace-local rules)
+
+Rate limits can also be delivered as typed `RateLimit` custom resources in
+the `gateway.qreta.io/v1alpha1` group (watched like `WafRule`). A CR is
+**namespace-local**: its rules only apply to requests whose resolved route
+belongs to the CR's namespace, so teams own their own budgets. One CR may
+carry multiple independent rules; each has three stages:
+
+1. **`match`** — a wirefilter selector (same fields/scheme as the WAF)
+   deciding whether the rule applies to a request. Empty = all requests.
+2. **`key`** — dynamic group sources. The client IP (TCP peer, never a
+   header) is always the first bucket component; each `header` adds that
+   header's runtime value, splitting one client's budget by tenant/API key.
+   Missing headers contribute an empty component.
+3. **`limit` / `windowSecs`** — the bounded sliding-window counter, per
+   bucket. The first rule over budget answers 429 with `Retry-After` and
+   `x-gateway-rate: <rule>`.
+
+```yaml
+apiVersion: gateway.qreta.io/v1alpha1
+kind: RateLimit
+metadata:
+  name: api-budgets
+  namespace: acme        # only acme's routes
+spec:
+  rules:
+    - name: per-tenant-api
+      match: 'http.path contains "/api"'
+      limit: 60
+      windowSecs: 60
+      key:
+        - header: x-api-key
+    - name: logins
+      match: 'http.method == "POST" and http.path contains "/login"'
+      limit: 5
+      windowSecs: 60
+```
+
+Selectors are compiled once off the request path (sharing the WAF's
+wirefilter parser and caps) and generation-gated with a last-good fallback.
+Static `[[ratelimit.rules]]` from TOML remain global and apply to every
+namespace. Bad selectors/numbers are rejected at the watch seam.
+
+Deployment prerequisite: the `WafRule` and `RateLimit` CRDs must be registered in kapi
 before the gateway boots. It is a watched family, so its seed LIST is
 part of boot convergence — an unregistered CRD holds the boot open until
 `[roll] converge_secs` and refuses it (FR-013), like any other family.

@@ -82,9 +82,16 @@ fn cel_context<'a>(req: &'a WafRequest<'a>) -> Context<'a> {
     ctx.add_variable("port", req.client_port).unwrap();
     ctx.add_variable("tls", req.tls).unwrap();
     // CEL has no first-class IP type here; carry the client IP as its
-    // string form. These four rules do not use IP/CIDR matching.
-    ctx.add_variable("client_ip", req.client_ip.unwrap().to_string())
-        .unwrap();
+    // string form. These four rules do not use IP/CIDR matching. The
+    // request literal always carries an IP; fall back to the wirefilter
+    // unknown-client sentinel rather than panicking the benchmark.
+    ctx.add_variable(
+        "client_ip",
+        req.client_ip
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            .to_string(),
+    )
+    .unwrap();
     ctx
 }
 

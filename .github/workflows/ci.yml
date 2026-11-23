@@ -19,6 +19,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans the full history; a shallow clone would miss
+          # a secret buried in an older commit.
+          fetch-depth: 0
+
+      - name: Secret scan (gitleaks CLI — no license needed)
+        # The gitleaks ACTION requires a paid license for orgs; the open
+        # source CLI does not. Install it directly and scan full history.
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin gitleaks
+          gitleaks version
+          gitleaks --config .gitleaks.toml detect --no-banner
 
       - name: Install Rust (nightly — edition 2024 / current deps)
         uses: dtolnay/rust-toolchain@master

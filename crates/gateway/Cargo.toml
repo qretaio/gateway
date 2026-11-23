@@ -6,10 +6,6 @@ publish = false
 description = "The gateway: host routing, edge cache, coalesced forwards, and the optional CRI deploy arm."
 
 [dependencies]
-# The typed Gateway API — the gateway builds on HttpRoute CRDs: it reads
-# routes from typed gateway.networking.k8s.io/v1 HttpRoute resources and
-# uses CustomResourceExt for the CRD seed.
-kube = { version = "5", default-features = false, features = ["client", "config", "rustls-tls", "ring", "derive"] }
 # The pure laws (route matcher, asset law + its AssetSpec, cache store,
 # trim) — one home, THIS workspace.
 gateway-core = { path = "../gateway-core" }
@@ -17,6 +13,9 @@ gateway-core = { path = "../gateway-core" }
 # structurally before the barrier, the in-flight count is the receiver
 # count.
 graceful-handover = { path = "../graceful-handover" }
+# Block/penalty sites emit `target: "incident"` tracing events; the
+# gateway-bin process registers the incident-log layer that captures them.
+tracing = "0.1"
 # The serving face (the same stack the node serves with).
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 hyper = { version = "1", default-features = false, features = ["http1", "server", "full"] }
@@ -51,10 +50,20 @@ serde_json = "1"
 # rows, queried by host + path-prefix predicate; the delta law stays the
 # Table's.
 venndb = "0.7"
+# Forward-confirmed reverse DNS for verified-bot allowlisting: a safe,
+# async stub resolver with PTR lookups, replacing hand-rolled getnameinfo
+# FFI (which would need unsafe and cannot be portably bounded with a
+# timeout). Only the system resolver config is used; no custom DNS.
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
+# The compiled rate-limit selectors share the WAF's wirefilter engine; the
+# gateway holds the compiled `Filter` behind an Arc across serving tasks.
+wirefilter-engine = { git = "https://github.com/cloudflare/wirefilter.git", rev = "a101f7c0fc60012803ee23432b5514644d9fbe4f" }
 anyhow = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 uniflight = "0.9.0"
 bytes = "1"
+# PoW challenge nonces: small, OS-seeded randomness (pure computation).
+getrandom = "0.3"
 
 [dev-dependencies]
 tokio-stream = "0.1"

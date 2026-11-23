@@ -20,15 +20,16 @@ use gateway_core::trim::trim_qreta;
 use tokio::sync::watch;
 use uniflight::Merger;
 
+use crate::bot_state::VerifiedBots;
 use crate::config::GatewayConfig;
 use crate::kapi::Informer;
+use crate::rate_limit_state::RateLimitState;
+use crate::rate_state::RateLimiter;
 use crate::waf_state::WafState;
 
 /// The gateway's reserved prefix (its own faces; the routing law never
-/// sees these paths).
-/// The gateway's reserved prefix (its own faces; the routing law
-/// never sees these paths). The owner dropped the edge-flavored
-/// vocabulary 2026-11-16: the faces ride /__gateway/* now.
+/// sees these paths). The owner dropped the edge-flavored vocabulary
+/// 2026-11-16: the faces ride /__gateway/* now.
 const RESERVED_PREFIX: &str = "/__gateway/";
 
 /// The hop-by-hop headers a proxy never forwards (RFC 9110 7.6.1).
@@ -63,6 +64,16 @@ pub struct Gateway {
     /// a watch delta recompiles off the hot path. Config validation at
     /// load guarantees the static half compiles.
     pub waf: WafState,
+    /// The compiled rate-limit ruleset (static TOML + watched namespace-
+    /// local CRs). The counter store is `limiter`; this owns the selectors
+    /// and the namespace scoping.
+    pub rate_rules: RateLimitState,
+    /// Per-bucket sliding-window counters. Ahead of the WAF so a limited
+    /// client never reaches an expensive rule or the backend.
+    pub limiter: RateLimiter,
+    /// Verified-bot allowlist checker (FCrDNS + bounded TTL cache). `None`
+    /// when disabled or the resolver cannot be built (fail-open).
+    pub bots: Option<VerifiedBots>,
 }
 
 /// The buffered result of one upstream forward. `Clone` is cheap (`Bytes`
@@ -100,6 +111,15 @@ impl Gateway {
         }
         let _ = data_root; // reserved for the CRI deploy supervisor
         let waf = WafState::new(&config.waf.rules);
+        let rate_rules = RateLimitState::new(&config.ratelimit.rules);
+        let limiter = RateLimiter::new();
+        // Building the resolver needs a Tokio runtime handle; `Gateway::new`
+        // is called inside one (boot/serve), but tests may construct it
+        // outside a runtime — treat that as "no checker" (fail-open).
+        let bots = match tokio::runtime::Handle::try_current() {
+            Ok(_) => VerifiedBots::new(config.verified_bots.clone()),
+            Err(_) => None,
+        };
         // The kapi URL rides the config's [kapi] section — the
         // embedded arm injects the in-process server's URL there
         // before this runs; the standalone subcommand refuses a
@@ -125,6 +145,9 @@ impl Gateway {
                 .build()
                 .expect("the forward client builds"),
             waf,
+            rate_rules,
+            limiter,
+            bots,
             config,
         }
     }
@@ -152,7 +175,20 @@ impl Gateway {
         self.informer.run(shutdown).await;
     }
 
+    /// Apply hardening headers to every response — including blocks,
+    /// cached answers, and proxied streams — then hand it back. Central
+    /// so no early-return path in `handle_inner` can skip hardening.
     async fn handle(&self, req: Request) -> Response {
+        let mut resp = self.handle_inner(req).await;
+        for (name, value) in self.config.hardening.headers() {
+            if let Ok(v) = http::HeaderValue::from_str(&value) {
+                resp.headers_mut().insert(name, v);
+            }
+        }
+        resp
+    }
+
+    async fn handle_inner(&self, req: Request) -> Response {
         let (parts, body) = req.into_parts();
         let method = parts.method.as_str().to_owned();
         let host = parts
@@ -162,11 +198,14 @@ impl Gateway {
             .map(|h| h.split(':').next().unwrap_or(h).to_ascii_lowercase())
             .unwrap_or_default();
         let path = parts.uri.path().to_owned();
-        let query = parts
-            .uri
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default();
+        // One canonical bare query string; the `?`-prefixed wire/cache
+        // form is derived once here and reused at every site that needs it.
+        let query = parts.uri.query().unwrap_or_default().to_owned();
+        let query_wire = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{query}")
+        };
 
         // The gateway's own faces (health, cache push) answer before the
         // routing law sees anything.
@@ -190,96 +229,246 @@ impl Gateway {
             })
             .collect();
         trim_qreta(&mut headers);
-        // x-forwarded-for is the gateway's own mint (the client's copy is
-        // not a host fact — overwrite, never append).
-        if let Some(ip) = parts
+        // The client IP is always the CONNECTION PEER, never a client
+        // header. x-forwarded-for is the gateway's own mint (the client's
+        // copy is not a host fact — overwrite, never append).
+        let peer = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0);
+        let peer_ip = peer.map(|s| s.ip());
+        if let Some(ip) = peer_ip {
+            headers.insert("x-forwarded-for".to_owned(), ip.to_string());
+        }
+
+        // Verified-bot exemption FIRST: a peer that forward-confirms to an
+        // allowlisted crawler skips both the rate limiter and the WAF and
+        // goes straight to routing. The lookup is cached and bounded; a
+        // failure/timeout fails open (no exemption), so a broken resolver
+        // never lets traffic bypass the WAF.
+        let verified_bot = match (&self.bots, peer_ip) {
+            (Some(bots), Some(ip)) => bots.is_verified(ip).await,
+            _ => false,
+        };
+
+        // A client that carries a VALID, unexpired solved PoW cookie is
+        // treated like a verified bot for the configurable WAF: the
+        // built-in private/secret-path deny still applies (it is in every
+        // compiled set), but Challenge rules are skipped. The cookie is
+        // HMAC-signed and carries the work proof, so it cannot be forged
+        // by a scraper without doing the SHA-256 work.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let pow_solved = self.config.pow.enabled()
+            && headers
+                .get("cookie")
+                .is_some_and(|cookies| {
+                    cookies.split(';').filter_map(|kv| kv.trim().split_once('=')).any(|(k, v)| {
+                        k == self.config.pow.cookie
+                            && gateway_core::pow::verify(&self.config.pow, v, now_ms)
+                    })
+                });
+
+        // One request view, shared by the WAF and every rate-limit
+        // selector. The peer is authoritative; the XFF header was just
+        // minted from it, so no client-supplied fallback is needed.
+        let waf_request = gateway_core::waf::WafRequest {
+            method: &method,
+            host: &host,
+            path: &path,
+            query: &query,
+            user_agent: headers.get("user-agent").map_or("", String::as_str),
+            referer: headers.get("referer").map_or("", String::as_str),
+            content_type: headers.get("content-type").map_or("", String::as_str),
+            client_ip: peer_ip,
+            client_port: peer.map_or(0, |s| i64::from(s.port())),
+            tls: parts
+                .uri
+                .scheme()
+                .is_some_and(|s| s == &http::uri::Scheme::HTTPS),
+        };
+
+        // One table read: resolve the route FIRST (a namespace-local rate
+        // limit needs the served app's namespace), then snapshot the two
+        // watched sets. Everything expensive (compiling selectors/rules)
+        // happens AFTER the guard drops.
+        let (resolved, watched_waf, watched_waf_gen, watched_rates, watched_rates_gen) = {
+            let table = self.informer.table.read().await;
+            let resolved = table.resolve(
+                &host,
+                &path,
+                |node, row| self.config.node_addr(node, row),
+                self.config.defaults.node.as_deref(),
+            );
+            (
+                resolved,
+                table.waf_rules(),
+                table.waf_rules_generation(),
+                if verified_bot {
+                    Vec::new()
+                } else {
+                    table.rate_limits()
+                },
+                table.rate_limits_generation(),
+            )
+        };
+        let namespace = resolved.as_ref().map(|(r, _)| r.org.as_str());
+
+        // A client that previously probed a reserved private/admin path is
+        // refused (429) on ALL requests until its penalty window expires —
+        // before any rate rule, WAF rule, cache, or backend work. The
+        // penalty is recorded by the private-path block below; this is its
+        // enforcement half. Verified bots are exempt from the penalty (the
+        // WAF's built-in private-path drop still applies to them).
+        if !verified_bot
+            && let Some(ip) = peer_ip
+            && self.limiter.is_private_path_penalized(ip)
         {
-            headers.insert("x-forwarded-for".to_owned(), ip.0.ip().to_string());
+            // Incident: a previously-penalized IP attempted to reach the
+            // gateway again. Captured by the incident tracing layer.
+            tracing::warn!(
+                target: "incident",
+                client_ip = %ip,
+                host = %host,
+                path = %path,
+                rule = "private-path-penalty",
+                action = "rate-limit",
+                "penalized client request refused"
+            );
+            return Response::builder()
+                .status(429)
+                .header("retry-after", "60")
+                .header("x-gateway-rate", "private-path-penalty")
+                .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from("rate limit exceeded\n"))
+                .unwrap();
+        }
+
+        // Rate limiting runs ahead of the WAF so a client past its budget
+        // never reaches an expensive rule or a backend. Namespace-local CR
+        // rules apply only to the resolved route's namespace; static TOML
+        // rules are global. Verified bots are exempt.
+        if !verified_bot && let Some(ip) = peer_ip {
+            let rate_rules = self
+                .rate_rules
+                .rules(&watched_rates, watched_rates_gen)
+                .for_namespace(namespace);
+            for rule in rate_rules {
+                if !rule.matches(&waf_request) {
+                    continue;
+                }
+                let bucket = rule.bucket(ip, &headers, &method, &host, &path);
+                if let Some(retry_after) = self.limiter.check(&bucket, rule.limit, rule.window) {
+                    let secs = retry_after.as_secs().max(1);
+                    tracing::warn!(
+                        target: "incident",
+                        client_ip = %ip,
+                        host = %host,
+                        path = %path,
+                        rule = %rule.name,
+                        action = "rate-limit",
+                        "configured rate limit exceeded"
+                    );
+                    return Response::builder()
+                        .status(429)
+                        .header("retry-after", secs.to_string())
+                        .header("x-gateway-rate", sanitize_header_value(&rule.name))
+                        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(Body::from("rate limit exceeded\n"))
+                        .unwrap();
+                }
+            }
         }
 
         // The WAF (wirefilter) walks the SAME trimmed, host-minted view
         // the route law sees: a client cannot spoof a reserved header
         // or its own client IP, and a match blocks before any cache or
-        // backend work. Fields are built from the inbound parts plus
-        // the xff the gateway just minted. The watched `WafRule` CRs are
-        // folded in on a generation change (off the hot path); the last
-        // good ruleset stays live if a CR's rules fail to compile.
-        let waf_rules = {
-            let watched = self.informer.table.read().await;
-            self.waf
-                .rules(&watched.waf_rules(), watched.waf_rules_generation())
+        // backend work. The watched `WafRule` CRs are folded in on a
+        // generation change (off the hot path); the last good ruleset
+        // stays live if a CR's rules fail to compile.
+        // The WAF ALWAYS evaluates, even with no configured rules and even
+        // for verified bots: the built-in private-path deny lives in
+        // `WafRules::evaluate` and must never be skipped by an `is_empty`
+        // fast path at this layer. Verified bots simply get an empty
+        // configurable ruleset (the built-in deny still runs).
+        // Verified bots keep their exemption from CONFIGURABLE rules
+        // (empty watched set here); the built-in private-path deny still
+        // runs inside `evaluate` either way.
+        let waf_rules = if verified_bot || pow_solved {
+            self.waf.builtin_only()
+        } else {
+            self.waf.rules(&watched_waf, watched_waf_gen)
         };
-        if !waf_rules.is_empty() {
-            let client_ip = parts
-                .extensions
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0.ip())
-                .or_else(|| {
-                    headers
-                        .get("x-forwarded-for")
-                        .and_then(|v| v.split(',').next())
-                        .and_then(|v| v.trim().parse().ok())
-                });
-            let client_port = parts
-                .extensions
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map_or(0, |c| i64::from(c.0.port()));
-            let waf_request = gateway_core::waf::WafRequest {
-                method: &method,
-                host: &host,
-                path: &path,
-                query: query.strip_prefix('?').unwrap_or(&query),
-                user_agent: headers.get("user-agent").map_or("", String::as_str),
-                referer: headers.get("referer").map_or("", String::as_str),
-                content_type: headers.get("content-type").map_or("", String::as_str),
-                client_ip,
-                client_port,
-                tls: parts
-                    .uri
-                    .scheme()
-                    .is_some_and(|s| s == &http::uri::Scheme::HTTPS),
+        let verdict = waf_rules.evaluate(&waf_request);
+        if let gateway_core::waf::WafVerdict::Block {
+            ref rule, action, ..
+        } = verdict
+            && action == gateway_core::waf::WafAction::Challenge
+            && self.config.pow.enabled()
+        {
+            // Issue a PoW puzzle: an HMAC-signed challenge plus a tiny
+            // HTML page whose JS finds a nonce with the configured number
+            // of leading zero bits, sets the solution cookie, and reloads.
+            // A scraper that will not run JS never gets past this page.
+            let nonce = {
+                let mut b = [0u8; 16];
+                let _ = getrandom::fill(&mut b);
+                b
             };
-            let verdict = waf_rules.evaluate(&waf_request);
-            if let gateway_core::waf::WafVerdict::Block {
-                rule, status, body, ..
-            } = verdict
-            {
-                // A rule name is operator-supplied config; never let a
-                // stray control character turn a block into a serving
-                // panic. The name is an audit hint, not a trust boundary.
-                let rule_header = http::HeaderValue::from_str(&rule)
-                    .unwrap_or_else(|_| http::HeaderValue::from_static("invalid-rule-name"));
-                return Response::builder()
-                    .status(status)
-                    .header("x-gateway-waf", rule_header)
-                    .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(Body::from(body))
-                    .unwrap();
-            }
+            let challenge = gateway_core::pow::issue(&self.config.pow, &nonce, now_ms);
+            let cookie = &self.config.pow.cookie;
+            let page = pow_challenge_page(&challenge, cookie, self.config.pow.difficulty);
+            return Response::builder()
+                .status(200)
+                .header("content-type", "text/html; charset=utf-8")
+                .header("x-gateway-waf", sanitize_header_value(rule))
+                .header("cache-control", "no-store")
+                .body(Body::from(page))
+                .unwrap();
         }
-
-        // FR-006: the cache consult rides the app's sealed scope; the
-        // scope goes live when the kubelet stamps the fingerprint on
-        // the row (the push face already accepts puts under it).
-        let table = self.informer.table.read().await;
-        let resolved = table.resolve(
-            &host,
-            &path,
-            |node, row| {
-                // The static map, then the rows' own stamps. The old
-                // spawn-arm child addresses are gone: the kubelet runs
-                // workloads through CRI-O, whose addresses the deploy
-                // supervisor resolves separately (`deploy.address`).
-                self.config.node_addr(node, row)
-            },
-            self.config.defaults.node.as_deref(),
-        );
+        if let gateway_core::waf::WafVerdict::Block {
+            rule, status, body, ..
+        } = verdict
+        {
+            // Probing a reserved private/admin path marks the source IP:
+            // its every subsequent request is rate-limited (429) for the
+            // penalty window. This is the recording half; enforcement is
+            // the check at the top of the pipeline. The block itself is
+            // returned regardless of the penalty.
+            if rule == gateway_core::waf::PRIVATE_PATH_RULE
+                && let Some(ip) = peer_ip
+            {
+                self.limiter.penalize_private_path(ip);
+                tracing::warn!(
+                    target: "incident",
+                    client_ip = %ip,
+                    host = %host,
+                    path = %path,
+                    rule = %rule,
+                    action = "block",
+                    "private/admin path probe blocked"
+                );
+            }
+            // A rule name is operator-supplied config (except our built-in
+            // literal); sanitize control characters and cap length so an
+            // odd name cannot turn a block into a serving failure — while
+            // keeping the name as the audit hint an operator needs.
+            let rule_header = http::HeaderValue::from_str(&sanitize_header_value(&rule))
+                .unwrap_or_else(|_| http::HeaderValue::from_static("invalid-rule-name"));
+            return Response::builder()
+                .status(status)
+                .header("x-gateway-waf", rule_header)
+                .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(body))
+                .unwrap();
+        }
         if let Some((resolved, _addr)) = &resolved
             && let Some(scope) = resolved.cache_scope()
         {
-            let key = format!("{method} {path}{query}");
+            let key = format!("{method} {path}{query_wire}");
             if let Some((cached, age)) = self.cache.get_with_age(&scope, &key) {
                 return cached_response(cached, age);
             }
@@ -287,6 +476,9 @@ impl Gateway {
         // FR-007's store half: the artifact tree answers static GETs
         // before the forward (a miss falls through; the worker may own
         // the path). The tree rides the row's spec.image + spec.assets.
+        // A fresh read guard supplies the namespace's pull credential to
+        // the asset store (only on a tree miss, where an OCI pull may run).
+        let table = self.informer.table.read().await;
         if let Some((resolved, _addr)) = &resolved
             && let Some(answer) = self
                 .assets
@@ -294,7 +486,7 @@ impl Gateway {
                     resolved,
                     &method,
                     &path,
-                    &query,
+                    &query_wire,
                     &headers,
                     &|namespace, registry| table.registry_auth(namespace, registry),
                 )
@@ -334,7 +526,7 @@ impl Gateway {
         // FR-003/FR-004: forward to the node's private listener with
         // the ORIGINAL Host preserved — the node's own table resolves
         // the app and instantiates it through the kubelet arm.
-        let url = format!("http://{addr}{path}{query}");
+        let url = format!("http://{addr}{path}{query_wire}");
         let method = parts.method.clone();
         let coalescible = method == http::Method::GET || method == http::Method::HEAD;
         let mut out = self.http.request(
@@ -364,12 +556,12 @@ impl Gateway {
             // the same cold cache entry collapse into ONE upstream fetch.
             // The resolved backend addr is in the key so a route change
             // mid-flight cannot hand a follower another node's response.
-            let key = format!("{method} {host}{path}{query} -> {addr}");
+            let key = format!("{method} {host}{path}{query_wire} -> {addr}");
             return self.coalesced_forward(&key, out).await;
         }
         match out.send().await {
             Ok(resp) => proxy_response(resp).await,
-            Err(e) => forward_error(&e, &path, &query),
+            Err(e) => forward_error(&e, &path, &query_wire),
         }
     }
 
@@ -419,6 +611,48 @@ impl Gateway {
         body: &[u8],
     ) -> Response {
         match (method, path) {
+            ("POST", "/__gateway/pow") => {
+                // The PoW challenge page POSTs its solved solution here.
+                // Verify it server-side, then set an HTTPOnly cookie and
+                // redirect back to the original page (the Referer).
+                let form = String::from_utf8_lossy(body);
+                // The solution is base64url — no percent-encoding needed.
+                let solution = form
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("solution="))
+                    .unwrap_or_default()
+                    .to_owned();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                if !self.config.pow.enabled()
+                    || !gateway_core::pow::verify(&self.config.pow, &solution, now_ms)
+                {
+                    return plain(403, "invalid proof of work\n");
+                }
+                let redirect = headers
+                    .get(http::header::REFERER)
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|s| s.starts_with('/') || s.contains("://"))
+                    .unwrap_or("/");
+                Response::builder()
+                    .status(303)
+                    .header("location", redirect)
+                    .header(
+                        "set-cookie",
+                        format!(
+                            "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+                            self.config.pow.cookie,
+                            solution,
+                            self.config.pow.verify_ttl_secs
+                        ),
+                    )
+                    .header("cache-control", "no-store")
+                    .body(Body::empty())
+                    .unwrap()
+            }
             ("GET", "/__gateway/health") => {
                 let (apps, served, nodes) = self.informer.table.read().await.counts();
                 let watches = self
@@ -450,7 +684,11 @@ impl Gateway {
                 // FR-006's push road: the node forwards app puts here
                 // (bearer-gated; the scope rides the body, baked
                 // host-side at instantiation — the seal gateway-core
-                // already enforces).
+                // already enforces). The WAF does NOT filter this face
+                // (reserved-prefix short-circuit above), so DEPLOYMENT
+                // MUST bind this listener to a private address or place
+                // it behind an access-control boundary: a leaked token
+                // lets a caller seed arbitrary cache entries for any app.
                 let Some(expected) = self.config.cache_push.as_ref() else {
                     return plain(403, "the cache push face is not configured\n");
                 };
@@ -459,7 +697,7 @@ impl Gateway {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.strip_prefix("Bearer "))
                     .unwrap_or("");
-                if presented != expected.token {
+                if !constant_time_eq(presented.as_bytes(), expected.token.as_bytes()) {
                     return plain(403, "the cache push token does not answer\n");
                 }
                 let Ok(push) = serde_json::from_slice::<CachePushBody>(body) else {
@@ -638,6 +876,64 @@ fn plain(status: u16, body: &str) -> Response {
         .unwrap()
 }
 
+/// The PoW challenge page. Its inline JS decodes the base64url challenge,
+/// brute-forces a `work` nonce with Web Crypto SHA-256 until the digest
+/// has `difficulty` leading zero bits, then POSTs the solution back to a
+/// tiny same-origin endpoint that sets the cookie and redirects. We do
+/// the cookie-setting via a form POST to `/__gateway/pow` (a gateway face)
+/// so the cookie is `HttpOnly` and not readable by JS.
+fn pow_challenge_page(challenge: &str, cookie: &str, difficulty: u8) -> String {
+    format!(r#"<!doctype html><html><head><meta charset="utf-8"><title>Verifying…</title></head>
+<body><p>Verifying your browser…</p>
+<form id="f" method="post" action="/__gateway/pow">
+<input type="hidden" name="solution" id="s"><input type="hidden" name="cookie" id="c" value="{cookie}">
+</form>
+<script>
+const b64 = (s) => atob(s.replace(/-/g,'+').replace(/_/g,'/') + '==='.slice((s.length+3)%4));
+async function sha(s) {{
+  const d = new TextEncoder().encode(s);
+  const h = await crypto.subtle.digest('SHA-256', d);
+  return new Uint8Array(h);
+}}
+function zeros(bytes) {{ let n=0; for (const b of bytes) {{ if (b===0) {{ n+=8; continue; }} n += Math.clz32(b)-24; break; }} return n; }}
+(async () => {{
+  const ch = b64({challenge:?});
+  const parts = ch.split(':');
+  const payload = parts.slice(0,3).join(':');
+  for (let i=0; i<2000000; i++) {{
+    const digest = await sha(payload + ':' + i);
+    if (zeros(digest) >= {difficulty}) {{
+      const solution = btoa(payload + ':' + i + ':' + parts[3]).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+      document.getElementById('s').value = solution;
+      document.getElementById('f').submit();
+      return;
+    }}
+  }}
+  document.body.textContent = 'Verification failed — please reload.';
+}})();
+</script></body></html>"#)
+}
+
+/// Compare two byte strings without early exit on the first difference.
+/// Used for the cache-push bearer: a plain `==` leaks the token's length
+/// and prefix through timing, and this face can write arbitrary cache
+/// entries for any app scope.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = u8::from(a.len() != b.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Make an operator-supplied rule name safe for an HTTP header value:
+/// drop control characters (which `HeaderValue` rejects) and cap the
+/// length, keeping the audit hint intact.
+fn sanitize_header_value(s: &str) -> String {
+    const MAX: usize = 128;
+    s.chars().filter(|c| !c.is_control()).take(MAX).collect()
+}
+
 /// The serving loop under the drain discipline (graceful-handover's
 /// law, kapi.spec EDGE-FR-010's first land): the trigger is a future, the
 /// stop-accept is STRUCTURAL — the select drops the serve future (and
@@ -667,4 +963,25 @@ pub async fn serve_until(
     }
     gateway.drain.trigger();
     gateway.drain.shutdown(timeout).await
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn bearer_compare_is_exact_and_length_safe() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret-extra"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn rule_names_are_sanitized_without_losing_their_identity() {
+        assert_eq!(sanitize_header_value("no-scanners"), "no-scanners");
+        assert_eq!(sanitize_header_value("bad\r\nname\u{7}"), "badname");
+        assert_eq!(sanitize_header_value(&"x".repeat(300)).len(), 128);
+    }
 }

@@ -2,3 +2,43 @@
 Cargo.lock
 .DS_Store
 build/gateway
+
+# --- local configuration & credentials --------------------------------------
+# Never commit environment files: they carry registry bearer tokens, the
+# cache-push bearer, and (on the node) the provision/admin mint secrets.
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+*.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+*_rsa
+*_rsa.pub
+
+# --- exposed paths (mirror the WAF's built-in deny) ---------------------------
+# These names must never be served at the edge (the WAF drops them) NOR
+# committed. Keep the ignore rules in sync with `DENIED_PATH_SEGMENTS` /
+# `DENIED_FILE_SUFFIXES` in crates/gateway-core/src/waf.rs.
+**/.env
+**/.env.*
+**/env.*
+**/*.env
+**/secrets.yaml
+**/secrets.yml
+**/secrets.json
+**/secrets.toml
+**/credentials
+**/id_rsa
+**/id_ed25519
+**/.htpasswd
+**/.netrc
+**/.npmrc
+**/.git-credentials
+
+# local manifests/secret stores
+~/src/qretaio/manifests/*/secrets/
+manifests/*/secrets/

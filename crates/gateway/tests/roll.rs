@@ -48,6 +48,10 @@ fn gateway_config(
             extra_read: Vec::new(),
         },
         waf: Default::default(),
+        ratelimit: Default::default(),
+        verified_bots: Default::default(),
+        pow: Default::default(),
+        hardening: Default::default(),
     }
 }
 

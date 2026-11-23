@@ -42,6 +42,10 @@ fn config() -> GatewayConfig {
         roll: RollConfig { converge_secs: 30 },
         deploy: None,
         waf: Default::default(),
+        ratelimit: Default::default(),
+        verified_bots: Default::default(),
+        pow: Default::default(),
+        hardening: Default::default(),
     }
 }
 

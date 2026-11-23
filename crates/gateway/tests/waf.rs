@@ -12,7 +12,10 @@ use std::sync::{
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
-use gateway::config::{GatewayConfig, KapiConfig, ListenConfig, WafAction, WafConfig, WafRule};
+use gateway::config::{
+    GatewayConfig, HardeningConfig, KapiConfig, ListenConfig, PowConfig, WafAction, WafConfig,
+    WafRule,
+};
 use gateway::server::Gateway;
 use gateway::table::Family;
 use serde_json::json;
@@ -64,6 +67,10 @@ fn config(kapi: &str, node: std::net::SocketAddr, rules: Vec<WafRule>) -> Gatewa
         deploy: None,
         sandbox: Default::default(),
         waf: WafConfig { rules },
+        ratelimit: Default::default(),
+        verified_bots: Default::default(),
+        pow: Default::default(),
+        hardening: Default::default(),
     }
 }
 
@@ -350,4 +357,124 @@ async fn a_bad_wafrule_cr_keeps_the_last_good_ruleset() {
         .await
         .unwrap();
     assert_eq!(resp.headers()["x-gateway-waf"], "static-block");
+}
+
+/// Reserved private/admin paths are dropped unconditionally (even with no
+/// configured rules) and the probing IP is immediately rate-limited on all
+/// subsequent requests. This is the edge half of the node's admin-channel
+/// law: `/__private/` and `/__internal/` only exist on the private listener.
+#[tokio::test]
+async fn private_paths_are_blocked_and_the_ip_is_immediately_penalized() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let node = mock_node(Arc::clone(&hits)).await;
+    // NO configured WAF rules — the built-in deny must still fire.
+    let (addr, _gw) = boot(config("http://127.0.0.1:1", node, vec![])).await;
+    let client = reqwest::Client::new();
+
+    // 1. A private-path probe is blocked with 404, stamped with the
+    //    built-in rule name, and never reaches the backend.
+    let probe = client
+        .get(format!("http://{addr}/__private/mint-provision-token"))
+        .header("host", "orders.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), StatusCode::NOT_FOUND);
+    assert_eq!(probe.headers()["x-gateway-waf"], "reserved-private-path");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a private-path probe never reaches the backend"
+    );
+
+    // 2. The SAME source IP is now rate-limited on an ordinary path —
+    //    429 with the penalty rule name, before any WAF rule/backend.
+    let after = client
+        .get(format!("http://{addr}/products"))
+        .header("host", "orders.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(after.headers()["x-gateway-rate"], "private-path-penalty");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// A `Challenge` WAF rule with PoW configured issues an HTML puzzle page
+/// (not a flat block), and a solved cookie bypasses the challenge.
+#[tokio::test]
+async fn pow_challenge_is_issued_and_a_solution_bypasses_it() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let node = mock_node(Arc::clone(&hits)).await;
+    let mut cfg = config("http://127.0.0.1:1", node, vec![]);
+    cfg.waf.rules = vec![WafRule {
+        name: "bot-check".into(),
+        expression: r#"http.ua contains "bot""#.into(),
+        action: WafAction::Challenge,
+        ..Default::default()
+    }];
+    cfg.pow = PowConfig {
+        secret: "test-secret".into(),
+        difficulty: 4,
+        ..Default::default()
+    };
+    let pow_cfg = cfg.pow.clone();
+    let cookie_name = cfg.pow.cookie.clone();
+    let (addr, _gw) = boot(cfg).await;
+    let client = reqwest::Client::new();
+
+    // 1. A bot gets the challenge page (200 HTML with JS), not a block.
+    let challenged = client
+        .get(format!("http://{addr}/"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "evilbot/1.0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(challenged.status(), StatusCode::OK);
+    let html = challenged.text().await.unwrap();
+    assert!(html.contains("Verifying"));
+    assert!(html.contains("crypto.subtle.digest"));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    // 2. A solved PoW cookie bypasses the challenge rule and reaches the
+    //    node. We solve with the pure law (same algorithm as the JS).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let nonce = [7u8; 16];
+    let challenge = gateway_core::pow::issue(&pow_cfg, &nonce, now);
+    let solution = gateway_core::pow::solve(&pow_cfg, &challenge, 1_000_000).unwrap();
+    let passed = client
+        .get(format!("http://{addr}/"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "evilbot/1.0")
+        .header("cookie", format!("{cookie_name}={solution}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(passed.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "solved bot reached the node");
+}
+
+/// Hardening headers are stamped on every response, including simple
+/// ones (404s, health, proxied answers).
+#[tokio::test]
+async fn hardening_headers_are_stamped_on_every_response() {
+    let node = mock_node(Arc::new(AtomicUsize::new(0))).await;
+    let mut cfg = config("http://127.0.0.1:1", node, vec![]);
+    cfg.hardening = HardeningConfig::default();
+    let (addr, _gw) = boot(cfg).await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/no-such-route"))
+        .header("host", "unknown.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(resp.headers()["referrer-policy"], "strict-origin-when-cross-origin");
+    assert_eq!(resp.headers()["x-frame-options"], "DENY");
+    assert!(resp.headers().contains_key("strict-transport-security"));
+    assert!(resp.headers().contains_key("content-security-policy"));
 }

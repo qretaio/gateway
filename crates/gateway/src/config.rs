@@ -5,6 +5,8 @@
 
 use serde::Deserialize;
 
+pub use gateway_core::headers::HardeningConfig;
+pub use gateway_core::pow::PowConfig;
 pub use gateway_core::waf::{WafAction, WafRule};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +49,10 @@ pub struct GatewayConfig {
     pub registry: std::collections::BTreeMap<String, String>,
     /// The cache-push bearer (`[cache_push] token`): the only caller
     /// allowed to put cache entries (the node, over the private
-    /// network). Absent = the face refuses every put.
+    /// network). Absent = the face refuses every put. The face is NOT
+    /// WAF-filtered and a leaked token can seed arbitrary entries, so
+    /// bind `[listen] addr` to a private interface (never `0.0.0.0:8080`
+    /// on a public host) when this token is configured.
     #[serde(default)]
     pub cache_push: Option<CachePushConfig>,
     /// The roll posture (`[roll] converge_secs`): the boot's budget for
@@ -76,6 +81,28 @@ pub struct GatewayConfig {
     /// config load — a malformed expression is a boot refusal.
     #[serde(default)]
     pub waf: WafConfig,
+    /// Per-client rate limits (`[[ratelimit.rules]]`): a bounded
+    /// sliding-window counter ahead of the WAF and the backend. The first
+    /// rule that exceeds its limit answers 429 with `Retry-After`. No
+    /// rules = the limiter is inert. Validated at config load.
+    #[serde(default)]
+    pub ratelimit: gateway_core::ratelimit::RateLimitConfig,
+    /// Verified-bot allowlist (`[verified_bots]`): when enabled, a peer IP
+    /// that forward-confirms (FCrDNS) to an allowlisted crawler hostname
+    /// is exempt from the WAF and rate limits. Off by default. DNS
+    /// failures/timeouts fail open (the client is treated normally).
+    #[serde(default)]
+    pub verified_bots: gateway_core::verified_bot::VerifiedBotConfig,
+    /// Proof-of-work challenges (`[pow]`): when configured with a secret,
+    /// WAF `Challenge` rules issue an HMAC-signed SHA-256 puzzle that a
+    /// browser solves in JS. Absent/empty secret = challenges fail closed
+    /// (the rule answers 503 instead of issuing a puzzle).
+    #[serde(default)]
+    pub pow: PowConfig,
+    /// Response hardening headers (`[hardening]`): HSTS, nosniff,
+    /// referrer/frame/permissions policy, and a default CSP.
+    #[serde(default)]
+    pub hardening: HardeningConfig,
 }
 
 /// The WAF section (`[[waf.rules]]`). Empty rules = the filter layer is
@@ -215,7 +242,7 @@ impl GatewayConfig {
     pub fn load(path: &str) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
         let config: Self = toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
-        config.validate_waf()?;
+        config.validate_request_features()?;
         Ok(config)
     }
 
@@ -225,6 +252,17 @@ impl GatewayConfig {
     /// gateway.
     pub fn validate_waf(&self) -> Result<(), String> {
         gateway_core::waf::validate(&self.waf.rules).map_err(|e| e.to_string())
+    }
+
+    /// Validate every request-path feature's config at the boundary: WAF
+    /// expressions, rate limits, and the verified-bot allowlist. Called by
+    /// both the standalone `load` path and the embedded/in-process path
+    /// before the listener binds.
+    pub fn validate_request_features(&self) -> Result<(), String> {
+        self.validate_waf()?;
+        self.ratelimit.validate()?;
+        self.verified_bots.validate()?;
+        Ok(())
     }
 
     /// The serving address for a node name: the config map first, then
@@ -301,6 +339,33 @@ mod tests {
         assert_eq!(first.action, WafAction::Block);
         assert!(!config.waf.rules[1].enabled);
         config.validate_waf().expect("the parked rule is skipped");
+    }
+
+    #[test]
+    fn invalid_rate_limits_and_bot_configs_refuse_the_config() {
+        let base = r#"
+            [listen]
+            addr = "127.0.0.1:8080"
+        "#;
+        // A zero limit is a boot refusal.
+        let bad_limit =
+            format!("{base}\n[[ratelimit.rules]]\nname = \"bad\"\nlimit = 0\nwindow_secs = 60\n");
+        let cfg: GatewayConfig = toml::from_str(&bad_limit).unwrap();
+        assert!(cfg.validate_request_features().is_err());
+
+        // An enabled bot allowlist with no suffixes is a boot refusal.
+        let bad_bots = format!("{base}\n[verified_bots]\nenabled = true\n");
+        let cfg: GatewayConfig = toml::from_str(&bad_bots).unwrap();
+        assert!(cfg.validate_request_features().is_err());
+
+        // A valid config with both features parses and validates.
+        let good = format!(
+            "{base}\n[[ratelimit.rules]]\nname = \"ten\"\nlimit = 10\nwindow_secs = 60\n\
+             [verified_bots]\nenabled = true\nallowed_suffixes = [\".googlebot.com\"]\n"
+        );
+        let cfg: GatewayConfig = toml::from_str(&good).unwrap();
+        assert!(cfg.validate_request_features().is_ok());
+        assert_eq!(cfg.verified_bots.normalized_suffixes(), [".googlebot.com"]);
     }
 
     #[test]

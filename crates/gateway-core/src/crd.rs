@@ -19,6 +19,9 @@ pub const GROUP_VERSION: &str = "gateway.qreta.io/v1alpha1";
 /// path is `{GROUP_VERSION}/{PLURAL}`).
 pub const WAF_RULE_PLURAL: &str = "wafrules";
 
+/// The plural path segment of the `RateLimit` kind.
+pub const RATE_LIMIT_PLURAL: &str = "ratelimits";
+
 /// One rule in a `WafRule` CR's `spec.rules`. The wire spelling is
 /// camelCase (`blockStatus`, `blockBody`) so a CR reads like every other
 /// k8s resource; `Default` keeps the operator surface friendly. This is
@@ -91,6 +94,79 @@ pub struct WafRuleStatus {
     pub message: Option<String>,
 }
 
+/// One source of the rate-limit group key. The client IP is ALWAYS part
+/// of the bucket; a `Header` adds the runtime value of a request header,
+/// so a single rule can split a client's budget by tenant/API key, etc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RateLimitKeySource {
+    /// Add the value of this request header to the bucket key. A missing
+    /// header contributes an empty component (all such requests share a
+    /// bucket) — deterministic, never a silently skipped limit.
+    Header(String),
+}
+
+/// One rule in a `RateLimit` CR's `spec.rules`. Evaluation order:
+///   1. the wirefilter `filter` selector decides whether this rule applies;
+///   2. the `key` sources build the bucket (IP is implicit);
+///   3. the bounded sliding-window counter enforces `limit` per `window`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitEntry {
+    /// Rule identity — stamped on a 429 (`x-gateway-rate`).
+    pub name: String,
+    /// Wirefilter selector (same fields as the WAF). Only requests whose
+    /// fields match are counted. An empty expression matches everything.
+    #[serde(default, rename = "match")]
+    pub filter: String,
+    /// Maximum counted requests in the window before answering 429.
+    pub limit: u32,
+    /// Window length, seconds.
+    pub window_secs: u64,
+    /// Dynamic key components beyond the implicit client IP.
+    #[serde(default)]
+    pub key: Vec<RateLimitKeySource>,
+    /// A parked rule never runs (default true).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for RateLimitEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            filter: String::new(),
+            limit: 0,
+            window_secs: 60,
+            key: Vec::new(),
+            enabled: default_enabled(),
+        }
+    }
+}
+
+impl RateLimitEntry {
+    /// Validate the rule's numeric fields at the config/watch boundary.
+    /// The selector is validated when compiled (same seam as WAF rules).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.limit == 0 {
+            return Err(format!("rate limit {}: limit must be > 0", self.name));
+        }
+        if self.window_secs == 0 {
+            return Err(format!("rate limit {}: windowSecs must be > 0", self.name));
+        }
+        Ok(())
+    }
+}
+
+/// The `RateLimit` CR spec: multiple independent rules. A request may be
+/// counted by several rules; the first whose counter blocks answers 429.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSpec {
+    #[serde(default)]
+    pub rules: Vec<RateLimitEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +187,33 @@ mod tests {
         assert_eq!(entry.body, "blocked by the WAF\n");
         assert!(entry.enabled);
         assert_eq!(entry.action, WafAction::Block);
+    }
+
+    #[test]
+    fn a_ratelimit_cr_parses_multiple_rules_with_a_header_key() {
+        let spec: RateLimitSpec = serde_json::from_str(
+            r#"{"rules":[
+                {"name":"global","match":"http.method == \"GET\"","limit":100,"windowSecs":60},
+                {"name":"per-tenant","match":"http.path contains \"/api\"","limit":5,
+                 "windowSecs":30,"key":[{"header":"x-api-key"}]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.rules.len(), 2);
+        assert_eq!(spec.rules[0].filter, r#"http.method == "GET""#);
+        assert!(spec.rules[0].key.is_empty());
+        assert!(spec.rules[0].enabled);
+        assert_eq!(
+            spec.rules[1].key,
+            vec![RateLimitKeySource::Header("x-api-key".to_owned())]
+        );
+        assert!(spec.rules.iter().all(|r| r.validate().is_ok()));
+    }
+
+    #[test]
+    fn a_ratelimit_rule_with_zero_limit_is_refused() {
+        let entry: RateLimitEntry =
+            serde_json::from_str(r#"{"name":"bad","match":"","limit":0,"windowSecs":60}"#).unwrap();
+        assert!(entry.validate().is_err());
     }
 }

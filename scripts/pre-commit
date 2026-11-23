@@ -1,0 +1,8 @@
+#!/bin/sh
+# Install as .git/hooks/pre-commit:
+#   ln -s ../../scripts/pre-commit .git/hooks/pre-commit
+# (or copy it there). Runs the gitleaks scan on staged files before commit.
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+"$REPO_ROOT/scripts/gitleaks-scan.sh" --staged

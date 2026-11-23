@@ -14,10 +14,13 @@ pub mod assets_store;
 pub use gateway_core::assets::AssetSpec;
 
 pub mod boot;
+pub mod bot_state;
 pub mod config;
 pub mod entry;
 pub mod kapi;
 pub mod oci;
+pub mod rate_limit_state;
+pub mod rate_state;
 pub mod sandbox;
 pub mod server;
 pub mod table;
