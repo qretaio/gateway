@@ -57,8 +57,9 @@ fn default_csp() -> String {
     // SSR apps (Astro/Preact) ship inline style attributes for dynamic
     // layout (widths, transforms, theme colors). Allow inline styles;
     // scripts stay strict ('self' only). Nonces/hashes on every dynamic
-    // attribute are impractical here.
-    "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+    // attribute are impractical here. Inline SVG data-URI images (icons,
+    // spinners) are emitted by the app markup, so allow data: images too.
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
         .to_owned()
 }
 
@@ -149,6 +150,11 @@ mod tests {
             ]
         );
         assert_eq!(h[0].1, "max-age=31536000; includeSubDomains");
+        let csp = h
+            .iter()
+            .find(|(n, _)| *n == "content-security-policy")
+            .unwrap();
+        assert!(csp.1.contains("img-src 'self' data:"));
     }
 
     #[test]

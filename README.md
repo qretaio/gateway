@@ -142,7 +142,7 @@ nosniff = true
 referrer_policy = "strict-origin-when-cross-origin"
 frame_options = "DENY"
 permissions_policy = "camera=(), microphone=(), geolocation=(), payment=()"
-content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+content_security_policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 # xss_protection = false   # legacy; modern CSP supersedes it
 ```
 
