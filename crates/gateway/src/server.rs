@@ -178,11 +178,20 @@ impl Gateway {
     /// Apply hardening headers to every response — including blocks,
     /// cached answers, and proxied streams — then hand it back. Central
     /// so no early-return path in `handle_inner` can skip hardening.
+    /// An upstream header of the same name wins: apps own their own
+    /// security posture (resonate's CSP permits its inline theme/SW
+    /// scripts), and the hardening law never removes an upstream header.
+    /// Defaults only fill gaps.
     async fn handle(&self, req: Request) -> Response {
         let mut resp = self.handle_inner(req).await;
         for (name, value) in self.config.hardening.headers() {
             if let Ok(v) = http::HeaderValue::from_str(&value) {
-                resp.headers_mut().insert(name, v);
+                use http::header::HeaderName;
+                if let Ok(hname) = HeaderName::from_bytes(name.as_bytes())
+                    && let http::header::Entry::Vacant(e) = resp.headers_mut().entry(hname)
+                {
+                    e.insert(v);
+                }
             }
         }
         resp

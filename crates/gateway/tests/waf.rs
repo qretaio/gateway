@@ -485,3 +485,48 @@ async fn hardening_headers_are_stamped_on_every_response() {
     assert!(resp.headers().contains_key("strict-transport-security"));
     assert!(resp.headers().contains_key("content-security-policy"));
 }
+
+/// An upstream app's own CSP wins over the gateway default. Resonate
+/// ships a CSP allowing its inline theme/SW scripts; the edge must not
+/// clobber it with its stricter default (the hardening law only fills
+/// gaps). Other hardening headers are still stamped when absent.
+#[tokio::test]
+async fn upstream_content_security_policy_is_preserved() {
+    let app = axum::Router::new().fallback(move |_req: Request| async {
+        Response::builder()
+            .status(200)
+            .header(
+                "content-security-policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline'",
+            )
+            .body(Body::from(
+                "app-owned CSP
+",
+            ))
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut cfg = config("http://127.0.0.1:1", node_addr, vec![]);
+    cfg.hardening = HardeningConfig::default();
+    let (addr, _gw) = boot(cfg).await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/app"))
+        .header("host", "orders.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()["content-security-policy"],
+        "default-src 'self'; script-src 'self' 'unsafe-inline'",
+        "the app's own CSP must survive the edge"
+    );
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        resp.headers()["referrer-policy"],
+        "strict-origin-when-cross-origin",
+        "missing hardening headers are still filled"
+    );
+}
