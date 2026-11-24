@@ -13,7 +13,7 @@ use kapigate::config::GatewayConfig;
 #[command(
     name = "gateway",
     version,
-    about = "the qreta fleet gateway: host routing, edge cache, and coalesced forwards"
+    about = "the qreta fleet serving face: host routing, edge cache, and coalesced forwards"
 )]
 struct Cli {
     /// The gateway config (TOML: `[listen]`, `[kapi]`, `[nodes]`, ...).
