@@ -89,10 +89,13 @@ const MAX_STORE_BYTES: usize = 256 * 1024 * 1024;
 /// The store. Mutex'd BTreeMap — pulls are rare (per image ref), reads
 /// are the hot path and take the same lock (a read is a map lookup +
 /// an Arc clone).
-#[derive(Default)]
 pub struct AssetStore {
     trees: std::sync::Mutex<BTreeMap<(String, String), Tree>>,
     tokens: BTreeMap<String, RegistryAuth>,
+    /// The shared on-disk cache (same layout as wisolate). Pulls through
+    /// `qreta-oci` answer stale immediately and refresh in the background;
+    /// the extraction is shared with the node at the same filesystem path.
+    disk: qreta_oci::Cache,
 }
 
 impl AssetStore {
@@ -101,9 +104,13 @@ impl AssetStore {
     /// map pulls unauthenticated — loopback, or through the namespace
     /// Secret the caller resolves per pull (the namespace rules).
     pub fn new(tokens: BTreeMap<String, RegistryAuth>) -> Self {
+        let root = std::env::var_os("QRETA_OCI_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/qreta/oci"));
         Self {
             trees: std::sync::Mutex::new(BTreeMap::new()),
             tokens,
+            disk: qreta_oci::Cache::new(root),
         }
     }
 
@@ -134,6 +141,13 @@ impl AssetStore {
             return None;
         }
         let image = resolved.image.as_ref()?;
+        // Shared disk cache: a tree extracted by the node is served
+        // without a second registry pull (same layout, same bytes).
+        if let Some(tree) = self.read_disk(image, spec) {
+            let answer = self.answer(&tree, path, query, req_headers);
+            self.trees.lock().unwrap().insert((org.clone(), app.clone()), tree);
+            if answer.is_some() { return answer; }
+        }
         {
             let trees = self.trees.lock().unwrap();
             if let Some(tree) = trees.get(&(org.clone(), app.clone()))
@@ -142,12 +156,17 @@ impl AssetStore {
                 return self.answer(tree, path, query, req_headers);
             }
         }
-        // Pull (outside the lock — the next reader either waits for the
+        // Stale-while-revalidate: a cached disk tree was already served (outside the lock — the next reader either waits for the
         // fresh tree or serves the old one; a pull failure leaves the
         // old tree standing).
         let image = image.clone();
         match self.pull(&image, spec, org, secret_lookup).await {
             Ok(tree) => {
+                // Publish to the shared disk cache (the node reads the
+                // same layout, no second pull). The digest is the
+                // image reference itself — content identity comes
+                // from the registry tag/digest in the row.
+                self.write_disk(&tree, &image);
                 let answer = self.answer(&tree, path, query, req_headers);
                 self.trees
                     .lock()
@@ -194,6 +213,41 @@ impl AssetStore {
         ))
     }
 
+    fn read_disk(&self, image: &str, spec: &kapigate_core::assets::AssetSpec) -> Option<Tree> {
+        let path = self.disk.path(image).ok()?;
+        if !path.join(".wisolate-extracted").exists() { return None; }
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Arc<Vec<u8>>>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for ent in rd.flatten() {
+                    let p = ent.path();
+                    if p.is_dir() { walk(root, &p, out); }
+                    else if let Some(s) = p.strip_prefix(root).ok().and_then(|r| r.to_str())
+                        && let Ok(bytes) = std::fs::read(&p)
+                    { out.insert(s.to_owned(), Arc::new(bytes)); }
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        walk(&path, &path, &mut files);
+        if files.is_empty() { return None; }
+        Some(Tree { image: image.to_owned(), files, spec: spec.clone() })
+    }
+
+    fn write_disk(&self, tree: &Tree, digest: &str) {
+        let Ok(path) = self.disk.path(&tree.image) else { return; };
+        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (rel, bytes) in &tree.files {
+            if rel.split('/').any(|s| s == "..") { continue; }
+            let target = tmp.join(rel);
+            if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
+            let _ = std::fs::write(target, bytes.as_ref());
+        }
+        let _ = std::fs::write(tmp.join(".hash"), digest.as_bytes());
+        let _ = std::fs::write(tmp.join(".wisolate-extracted"), b"");
+        if path.exists() { let _ = std::fs::remove_dir_all(&path); }
+        let _ = std::fs::rename(&tmp, &path);
+    }
     /// Pull the artifact and extract the asset tree: the manifest (or
     /// its index descent), every tar layer and every unit-wrapper
     /// payload untars into the tree; digests verify before use.

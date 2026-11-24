@@ -23,6 +23,8 @@ http = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync", "signal", "process"] }
 # The kapi watch client and the node forwarder.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
+# Shared OCI pull + disk cache with both wisolate and kapigate (SWR).
+qreta-oci = { path = "../../../oci" }
 # The reuseport bind (kapi.spec EDGE-FR-010): the roll's overlap
 # listens on the same port as its predecessor.
 socket2 = { version = "0.5", features = ["all"] }
