@@ -75,7 +75,7 @@ async fn mint_bearer(
 pub struct Tree {
     pub image: String,
     pub files: BTreeMap<String, Arc<Vec<u8>>>,
-    pub spec: gateway_core::assets::AssetSpec,
+    pub spec: kapigate_core::assets::AssetSpec,
 }
 
 /// Per-file cap: an asset bigger than this refuses the tree (the
@@ -179,12 +179,12 @@ impl AssetStore {
             .iter()
             .map(|(k, v)| (k.clone(), v.len() as u64))
             .collect();
-        let rel = gateway_core::assets::resolve_asset(&files, path)?;
+        let rel = kapigate_core::assets::resolve_asset(&files, path)?;
         let bytes = tree.files.get(&rel)?;
         // `query` never reaches the store — the tree is
         // content-addressed by path.
         let _ = query;
-        Some(gateway_core::assets::asset_response(
+        Some(kapigate_core::assets::asset_response(
             &tree.spec.hashes,
             &tree.spec.header_rules,
             &rel,
@@ -200,7 +200,7 @@ impl AssetStore {
     async fn pull(
         &self,
         image: &str,
-        spec: &gateway_core::assets::AssetSpec,
+        spec: &kapigate_core::assets::AssetSpec,
         org: &str,
         secret_lookup: &(dyn Fn(&str, &str) -> Option<crate::table::RegistryAuth> + Send + Sync),
     ) -> Result<Tree, String> {

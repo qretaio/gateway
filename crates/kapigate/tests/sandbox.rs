@@ -4,7 +4,7 @@
 //! the bind grant, writes grant nowhere, and the extra_connect knob is
 //! the only hand-named addition.
 
-use gateway::config::{
+use kapigate::config::{
     CachePushConfig, DefaultsConfig, DrainConfig, GatewayConfig, KapiConfig, ListenConfig,
     RollConfig, SandboxConfig,
 };
@@ -53,7 +53,7 @@ fn config() -> GatewayConfig {
 /// default's own lookup included), DNS, TLS, plus extra_connect.
 #[test]
 fn the_connect_grant_names_every_port_the_config_talks_to() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     let connect = policy.network.tcp_connect.clone().expect("an allow-list");
     for port in [8643, 8789, 9001, 53, 443, 9901] {
         assert!(
@@ -76,7 +76,7 @@ fn the_connect_grant_names_every_port_the_config_talks_to() {
 fn extra_read_grants_a_child_reexec_target() {
     let mut cfg = config();
     cfg.sandbox.extra_read = vec!["/usr/local/bin/wisolate".to_owned()];
-    let policy = gateway::sandbox::policy(&cfg);
+    let policy = kapigate::sandbox::policy(&cfg);
     assert!(
         policy
             .read_allow
@@ -84,7 +84,7 @@ fn extra_read_grants_a_child_reexec_target() {
             .any(|p| p == std::path::Path::new("/usr/local/bin/wisolate")),
         "the node's launch binary is granted through the gateway's domain"
     );
-    let base = gateway::sandbox::policy(&config());
+    let base = kapigate::sandbox::policy(&config());
     assert!(
         !base
             .read_allow
@@ -97,7 +97,7 @@ fn extra_read_grants_a_child_reexec_target() {
 /// The bind grant is the listener's own port.
 #[test]
 fn the_bind_grant_is_the_listen_port() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     assert_eq!(
         policy.network.tcp_bind.as_deref(),
         Some(&[8787u16][..]),
@@ -109,7 +109,7 @@ fn the_bind_grant_is_the_listen_port() {
 /// the capability set drops whole; no privilege gains.
 #[test]
 fn the_gateway_writes_nothing_and_gains_nothing() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     assert!(
         policy.write_allow.is_empty(),
         "the gateway is stateless: no write grants"
@@ -125,7 +125,7 @@ fn the_gateway_writes_nothing_and_gains_nothing() {
 /// named regardless).
 #[test]
 fn udp_is_denied_except_dns() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     assert_eq!(policy.network.udp_bind.as_deref(), Some(&[][..]));
     assert_eq!(policy.network.udp_connect.as_deref(), Some(&[53u16][..]));
 }
@@ -134,7 +134,7 @@ fn udp_is_denied_except_dns() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_reads_stay_world() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     assert!(
         policy
             .read_allow
@@ -152,7 +152,7 @@ fn macos_reads_stay_world() {
 #[test]
 fn the_face_yields_to_the_children_on_macos() {
     assert_eq!(
-        gateway::sandbox::parent_confines(),
+        kapigate::sandbox::parent_confines(),
         !cfg!(target_os = "macos"),
         "the gateway face yields on macOS, confines on Linux"
     );
@@ -161,7 +161,7 @@ fn the_face_yields_to_the_children_on_macos() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_reads_narrow_to_resolver_and_loader() {
-    let policy = gateway::sandbox::policy(&config());
+    let policy = kapigate::sandbox::policy(&config());
     for p in ["/etc/resolv.conf", "/lib", "/usr/lib"] {
         assert!(
             policy

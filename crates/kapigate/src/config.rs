@@ -5,9 +5,9 @@
 
 use serde::Deserialize;
 
-pub use gateway_core::headers::HardeningConfig;
-pub use gateway_core::pow::PowConfig;
-pub use gateway_core::waf::{WafAction, WafRule};
+pub use kapigate_core::headers::HardeningConfig;
+pub use kapigate_core::pow::PowConfig;
+pub use kapigate_core::waf::{WafAction, WafRule};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
@@ -86,13 +86,13 @@ pub struct GatewayConfig {
     /// rule that exceeds its limit answers 429 with `Retry-After`. No
     /// rules = the limiter is inert. Validated at config load.
     #[serde(default)]
-    pub ratelimit: gateway_core::ratelimit::RateLimitConfig,
+    pub ratelimit: kapigate_core::ratelimit::RateLimitConfig,
     /// Verified-bot allowlist (`[verified_bots]`): when enabled, a peer IP
     /// that forward-confirms (FCrDNS) to an allowlisted crawler hostname
     /// is exempt from the WAF and rate limits. Off by default. DNS
     /// failures/timeouts fail open (the client is treated normally).
     #[serde(default)]
-    pub verified_bots: gateway_core::verified_bot::VerifiedBotConfig,
+    pub verified_bots: kapigate_core::verified_bot::VerifiedBotConfig,
     /// Proof-of-work challenges (`[pow]`): when configured with a secret,
     /// WAF `Challenge` rules issue an HMAC-signed SHA-256 puzzle that a
     /// browser solves in JS. Absent/empty secret = challenges fail closed
@@ -251,7 +251,7 @@ impl GatewayConfig {
     /// surprise. Also called by the embedded arm before it composes the
     /// gateway.
     pub fn validate_waf(&self) -> Result<(), String> {
-        gateway_core::waf::validate(&self.waf.rules).map_err(|e| e.to_string())
+        kapigate_core::waf::validate(&self.waf.rules).map_err(|e| e.to_string())
     }
 
     /// Validate every request-path feature's config at the boundary: WAF

@@ -5,7 +5,7 @@
 //! can claim `*.googlebot.com`; the forward confirmation closes that hole.
 //!
 //! Pure over plain data: the DNS I/O and the bounded, TTL'd cache live in
-//! the gateway crate ([`gateway::bot_state`]). This module answers only
+//! the gateway crate ([`kapigate::bot_state`]). This module answers only
 //! "do these three facts constitute a verified bot", so the rule is
 //! testable with a hostname and an IP list and no resolver.
 

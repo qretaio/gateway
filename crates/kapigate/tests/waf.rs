@@ -12,12 +12,12 @@ use std::sync::{
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
-use gateway::config::{
+use kapigate::config::{
     GatewayConfig, HardeningConfig, KapiConfig, ListenConfig, PowConfig, WafAction, WafConfig,
     WafRule,
 };
-use gateway::server::Gateway;
-use gateway::table::Family;
+use kapigate::server::Gateway;
+use kapigate::table::Family;
 use serde_json::json;
 
 /// A mock node that counts every request it receives.
@@ -444,8 +444,8 @@ async fn pow_challenge_is_issued_and_a_solution_bypasses_it() {
         .unwrap()
         .as_millis() as i64;
     let nonce = [7u8; 16];
-    let challenge = gateway_core::pow::issue(&pow_cfg, &nonce, now);
-    let solution = gateway_core::pow::solve(&pow_cfg, &challenge, 1_000_000).unwrap();
+    let challenge = kapigate_core::pow::issue(&pow_cfg, &nonce, now);
+    let solution = kapigate_core::pow::solve(&pow_cfg, &challenge, 1_000_000).unwrap();
     let passed = client
         .get(format!("http://{addr}/"))
         .header("host", "orders.example.com")

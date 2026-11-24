@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gateway_core::waf::{WafRule, WafRules};
+use kapigate_core::waf::{WafRule, WafRules};
 
 /// The compiled WAF state shared across serving tasks.
 pub struct WafState {

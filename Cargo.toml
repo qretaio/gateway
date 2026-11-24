@@ -2,24 +2,24 @@
 resolver = "3"
 exclude = ["vendor/seatlock", "vendor/fsm"]
 members = [
-    "crates/gateway",
-    "crates/gateway-core",
+    "crates/kapigate",
+    "crates/kapigate-core",
     "crates/graceful-handover",
 ]
 
 [package]
-name = "gateway-bin"
+name = "kapigate-bin"
 version = "0.1.0"
 edition = "2024"
 publish = false
 description = "The standalone gateway binary: TLS, host routing, the edge cache, and request coalescing for the qreta fleet."
 
 [[bin]]
-name = "gateway"
+name = "kapigate"
 path = "src/main.rs"
 
 [dependencies]
-gateway = { path = "crates/gateway" }
+kapigate = { path = "crates/kapigate" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

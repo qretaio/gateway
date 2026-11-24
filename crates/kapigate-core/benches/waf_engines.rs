@@ -1,5 +1,5 @@
 //! WAF filter engine bake-off: Cloudflare wirefilter 0.7 (the gateway's
-//! WAF law, via `gateway_core::waf`) vs CEL (`cel-interpreter`).
+//! WAF law, via `kapigate_core::waf`) vs CEL (`cel-interpreter`).
 //!
 //! Run with:
 //!
@@ -21,7 +21,7 @@
 
 use cel_interpreter::{Context, Program, Value as CelValue};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gateway_core::waf::{WafRequest, WafRule, WafRules};
+use kapigate_core::waf::{WafRequest, WafRule, WafRules};
 
 /// The request snapshot shared by all benchmarks — a plausible inbound
 /// API call that a WAF would inspect.

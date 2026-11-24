@@ -15,8 +15,8 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::response::Response;
 use bytes::Bytes;
-use gateway_core::cache::{CachedResponse, EdgeCache};
-use gateway_core::trim::trim_qreta;
+use kapigate_core::cache::{CachedResponse, EdgeCache};
+use kapigate_core::trim::trim_qreta;
 use tokio::sync::watch;
 use uniflight::Merger;
 
@@ -306,14 +306,14 @@ impl Gateway {
                     .filter_map(|kv| kv.trim().split_once('='))
                     .any(|(k, v)| {
                         k == self.config.pow.cookie
-                            && gateway_core::pow::verify(&self.config.pow, v, now_ms)
+                            && kapigate_core::pow::verify(&self.config.pow, v, now_ms)
                     })
             });
 
         // One request view, shared by the WAF and every rate-limit
         // selector. The peer is authoritative; the XFF header was just
         // minted from it, so no client-supplied fallback is needed.
-        let waf_request = gateway_core::waf::WafRequest {
+        let waf_request = kapigate_core::waf::WafRequest {
             method: &method,
             host: &host,
             path: &path,
@@ -441,13 +441,13 @@ impl Gateway {
             self.waf.rules(&watched_waf, watched_waf_gen)
         };
         let verdict = waf_rules.evaluate(&waf_request);
-        if let gateway_core::waf::WafVerdict::Hardening { headers, .. } = &verdict {
+        if let kapigate_core::waf::WafVerdict::Hardening { headers, .. } = &verdict {
             *overrides = Some(headers.clone());
         }
-        if let gateway_core::waf::WafVerdict::Block {
+        if let kapigate_core::waf::WafVerdict::Block {
             ref rule, action, ..
         } = verdict
-            && action == gateway_core::waf::WafAction::Challenge
+            && action == kapigate_core::waf::WafAction::Challenge
             && self.config.pow.enabled()
         {
             // Issue a PoW puzzle: an HMAC-signed challenge plus a tiny
@@ -459,7 +459,7 @@ impl Gateway {
                 let _ = getrandom::fill(&mut b);
                 b
             };
-            let challenge = gateway_core::pow::issue(&self.config.pow, &nonce, now_ms);
+            let challenge = kapigate_core::pow::issue(&self.config.pow, &nonce, now_ms);
             let cookie = &self.config.pow.cookie;
             let page = pow_challenge_page(&challenge, cookie, self.config.pow.difficulty);
             return Response::builder()
@@ -470,7 +470,7 @@ impl Gateway {
                 .body(Body::from(page))
                 .unwrap();
         }
-        if let gateway_core::waf::WafVerdict::Block {
+        if let kapigate_core::waf::WafVerdict::Block {
             rule, status, body, ..
         } = verdict
         {
@@ -479,7 +479,7 @@ impl Gateway {
             // penalty window. This is the recording half; enforcement is
             // the check at the top of the pipeline. The block itself is
             // returned regardless of the penalty.
-            if rule == gateway_core::waf::PRIVATE_PATH_RULE
+            if rule == kapigate_core::waf::PRIVATE_PATH_RULE
                 && let Some(ip) = client_ip
             {
                 self.limiter.penalize_private_path(ip);
@@ -669,7 +669,7 @@ impl Gateway {
                     .as_millis()
                     .min(i64::MAX as u128) as i64;
                 if !self.config.pow.enabled()
-                    || !gateway_core::pow::verify(&self.config.pow, &solution, now_ms)
+                    || !kapigate_core::pow::verify(&self.config.pow, &solution, now_ms)
                 {
                     return plain(403, "invalid proof of work\n");
                 }

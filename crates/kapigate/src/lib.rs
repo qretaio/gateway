@@ -11,7 +11,7 @@
 //! controllers) — `controller::spawn::Kubelet`, composed here unchanged.
 
 pub mod assets_store;
-pub use gateway_core::assets::AssetSpec;
+pub use kapigate_core::assets::AssetSpec;
 
 pub mod boot;
 pub mod bot_state;

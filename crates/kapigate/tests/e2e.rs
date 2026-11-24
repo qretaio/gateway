@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 
-use gateway::config::{CachePushConfig, GatewayConfig, KapiConfig, ListenConfig};
-use gateway::server::Gateway;
+use kapigate::config::{CachePushConfig, GatewayConfig, KapiConfig, ListenConfig};
+use kapigate::server::Gateway;
 
 /// An app-shaped route seed as a typed HttpRoute body.
 fn hr(name: &str, routes: &[&str]) -> Value {
@@ -415,7 +415,7 @@ async fn a_route_without_a_pod_503s_honestly() {
 /// effect on the next request; allowed traffic still reaches the node.
 #[tokio::test]
 async fn wafrule_crs_from_the_watch_validate_real_requests() {
-    use gateway::table::Family;
+    use kapigate::table::Family;
 
     let node_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let node_addr = mock_node(Arc::clone(&node_hits)).await;
@@ -518,7 +518,7 @@ async fn wafrule_crs_from_the_watch_validate_real_requests() {
 
 #[test]
 fn the_table_takes_a_seeded_row() {
-    use gateway::table::{Family, Table};
+    use kapigate::table::{Family, Table};
     let app_row = hr("orders", &["orders.example.com"]);
     let items = vec![app_row];
     let mut t = Table::default();
@@ -532,7 +532,7 @@ fn the_table_takes_a_seeded_row() {
 /// answer, the digest verifies, a new ref re-pulls.
 #[tokio::test]
 async fn the_asset_store_pulls_and_serves_the_tree() {
-    use gateway::assets_store::AssetStore;
+    use kapigate::assets_store::AssetStore;
     use std::io::Write as _;
 
     // The artifact: one gzip-tar layer carrying assets/index.html.
@@ -551,7 +551,7 @@ async fn the_asset_store_pulls_and_serves_the_tree() {
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     gz.write_all(&tar_buf).unwrap();
     let layer = gz.finish().unwrap();
-    let digest = format!("sha256:{}", gateway::oci::sha256_hex(&layer));
+    let digest = format!("sha256:{}", kapigate::oci::sha256_hex(&layer));
     let manifest = json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -562,7 +562,7 @@ async fn the_asset_store_pulls_and_serves_the_tree() {
                     "digest": digest, "size": layer.len()}]
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", gateway::oci::sha256_hex(&manifest_bytes));
+    let manifest_digest = format!("sha256:{}", kapigate::oci::sha256_hex(&manifest_bytes));
 
     // The mock registry: the manifest face + the blob face.
     let app = axum::Router::new().fallback(move |req: Request| {
@@ -608,11 +608,11 @@ async fn the_asset_store_pulls_and_serves_the_tree() {
         "hashes": {"index.html": "aaaaaaaaaaaaaaaa"},
         "header_rules": []
     });
-    let spec: gateway::AssetSpec = serde_json::from_value(spec).unwrap();
+    let spec: kapigate::AssetSpec = serde_json::from_value(spec).unwrap();
 
     // The pull + the law-shaped answer.
     let image = format!("{registry_addr}/acme/site:latest");
-    let resolved = gateway::table::Resolved {
+    let resolved = kapigate::table::Resolved {
         node: Some("node-a".into()),
         org: "acme".into(),
         app: "site".into(),
@@ -724,7 +724,7 @@ async fn the_drain_waits_in_flight_requests_out() {
     let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
     let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_addr = gateway_listener.local_addr().unwrap();
-    let server = tokio::spawn(gateway::server::serve_until(
+    let server = tokio::spawn(kapigate::server::serve_until(
         Arc::clone(&gateway),
         gateway_listener,
         async move {

@@ -1,14 +1,14 @@
 [package]
-name = "gateway"
+name = "kapigate"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The gateway: host routing, edge cache, coalesced forwards, and the optional CRI deploy arm."
+description = "The kapigate serving face: host routing, edge cache, coalesced forwards, and the optional CRI deploy arm."
 
 [dependencies]
 # The pure laws (route matcher, asset law + its AssetSpec, cache store,
 # trim) — one home, THIS workspace.
-gateway-core = { path = "../gateway-core" }
+kapigate-core = { path = "../kapigate-core" }
 # The drain discipline: the trigger latches, stop-accept happens
 # structurally before the barrier, the in-flight count is the receiver
 # count.

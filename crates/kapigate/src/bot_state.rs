@@ -2,7 +2,7 @@
 //! against an operator allowlist, with a bounded, TTL'd per-IP cache.
 //!
 //! This is the stateful half; the decision law is
-//! [`gateway_core::verified_bot::verify_fcrdns`]. DNS I/O lives here because
+//! [`kapigate_core::verified_bot::verify_fcrdns`]. DNS I/O lives here because
 //! gateway-core forbids it. Failures, timeouts, and a disabled/unbuildable
 //! resolver all FAIL OPEN for the exemption (the client is treated as a
 //! regular request and still faces WAF + rate limits) — an allowlist that
@@ -18,7 +18,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use gateway_core::verified_bot::VerifiedBotConfig;
+use kapigate_core::verified_bot::VerifiedBotConfig;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::{RData, RecordType};
 
@@ -112,7 +112,7 @@ impl VerifiedBots {
             })?;
             let fwd = self.inner.resolver.lookup_ip(&host).await.ok()?;
             let forward_ips: Vec<IpAddr> = fwd.iter().collect();
-            Some(gateway_core::verified_bot::verify_fcrdns(
+            Some(kapigate_core::verified_bot::verify_fcrdns(
                 &host,
                 &forward_ips,
                 ip,

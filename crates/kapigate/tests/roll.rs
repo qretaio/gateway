@@ -12,11 +12,11 @@ use axum::response::Response;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use gateway::config::{
+use kapigate::config::{
     DrainConfig, GatewayConfig, KapiConfig, ListenConfig, RollConfig, SandboxConfig,
 };
-use gateway::kapi::Informer;
-use gateway::server::Gateway;
+use kapigate::kapi::Informer;
+use kapigate::server::Gateway;
 
 /// A minimal config over the given kapi address; the listen port is
 /// the caller's (the boot's handshake probes it).
@@ -212,8 +212,8 @@ async fn mock_predecessor(port: u16, max_rv: u64) {
 #[tokio::test]
 async fn the_overlap_shares_one_port() {
     let port = free_port();
-    let a = gateway::boot::bind_reuseport(&format!("127.0.0.1:{port}")).unwrap();
-    let b = gateway::boot::bind_reuseport(&format!("127.0.0.1:{port}")).unwrap();
+    let a = kapigate::boot::bind_reuseport(&format!("127.0.0.1:{port}")).unwrap();
+    let b = kapigate::boot::bind_reuseport(&format!("127.0.0.1:{port}")).unwrap();
     assert_eq!(
         a.local_addr().unwrap().port(),
         b.local_addr().unwrap().port(),
@@ -258,7 +258,7 @@ async fn the_boot_binds_only_after_the_table_converges() {
     let inf = Arc::new(informer);
     let run_inf = Arc::clone(&inf);
     tokio::spawn(async move { run_inf.run(shutdown_rx).await });
-    let refused = gateway::boot::boot_listener(&config, &inf).await;
+    let refused = kapigate::boot::boot_listener(&config, &inf).await;
     assert!(
         refused.is_err(),
         "a non-converging table refuses the boot: {:?}",
@@ -281,7 +281,7 @@ async fn the_boot_binds_only_after_the_table_converges() {
     let (_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let run_gateway = Arc::clone(&gateway);
     tokio::spawn(async move { run_gateway.run_informer(shutdown_rx).await });
-    let listener = gateway::boot::boot_listener(&gateway.config, &gateway.informer)
+    let listener = kapigate::boot::boot_listener(&gateway.config, &gateway.informer)
         .await
         .expect("the converged boot binds");
     let serve_gateway = Arc::clone(&gateway);
@@ -338,7 +338,7 @@ async fn the_handshake_gates_on_the_predecessor_version() {
     let inf = Arc::new(informer);
     let run_inf = Arc::clone(&inf);
     tokio::spawn(async move { run_inf.run(shutdown_rx).await });
-    let refused = gateway::boot::boot_listener(&config, &inf).await;
+    let refused = kapigate::boot::boot_listener(&config, &inf).await;
     assert!(
         refused.is_err(),
         "a predecessor ahead refuses the boot: {:?}",
@@ -370,7 +370,7 @@ async fn the_handshake_gates_on_the_predecessor_version() {
     let run_inf = Arc::clone(&inf);
     tokio::spawn(async move { run_inf.run(shutdown_rx).await });
     assert!(
-        gateway::boot::boot_listener(&config, &inf).await.is_ok(),
+        kapigate::boot::boot_listener(&config, &inf).await.is_ok(),
         "a cold boot binds on its own converged fact"
     );
 }
@@ -410,7 +410,7 @@ async fn the_boot_refuses_until_every_family_converges() {
     // The boot runs in the background; the gate decides when the port
     // appears.
     let boot_inf = Arc::clone(&inf);
-    let boot = tokio::spawn(async move { gateway::boot::boot_listener(&config, &boot_inf).await });
+    let boot = tokio::spawn(async move { kapigate::boot::boot_listener(&config, &boot_inf).await });
 
     // While secrets is unlisted, NOTHING is bound: a probe window
     // across the first two refused re-lists (the gate reads the law —

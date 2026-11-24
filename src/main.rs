@@ -7,7 +7,7 @@
 //! named in `[kapi]`; a config without it is a boot refusal.
 
 use clap::Parser;
-use gateway::config::GatewayConfig;
+use kapigate::config::GatewayConfig;
 
 #[derive(Parser)]
 #[command(
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
     if config.sandbox.enabled {
-        gateway::sandbox::apply(&config);
+        kapigate::sandbox::apply(&config);
     }
     // Bound memory: the default blocking pool (512 × 2 MiB stacks) is far
     // larger than the gateway needs.
@@ -52,5 +52,5 @@ fn main() -> anyhow::Result<()> {
         .thread_stack_size(256 * 1024)
         .enable_all()
         .build()?;
-    rt.block_on(gateway::entry::run(config, None))
+    rt.block_on(kapigate::entry::run(config, None))
 }

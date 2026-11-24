@@ -1,5 +1,5 @@
 //! The stateful rate-limit store: bounded per-key sliding-window counters
-//! over the pure [`gateway_core::ratelimit`] law. Lives in the gateway (not
+//! over the pure [`kapigate_core::ratelimit`] law. Lives in the gateway (not
 //! the pure-law crate) because it owns a clock, a mutable map, and a
 //! resource cap. A single process-wide store means every replica enforces
 //! only 1/N of a configured limit — documented, with the shared-counter
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use gateway_core::ratelimit::RateDecision;
+use kapigate_core::ratelimit::RateDecision;
 
 /// Upper bound on tracked keys. A client that sprays source IPs must not
 /// grow this map without limit; past the cap the least-recently-used key
@@ -65,7 +65,7 @@ impl RateLimiter {
             .get(bucket)
             .map_or(&[][..], |e| e.hits.as_slice())
             .to_vec();
-        let result = match gateway_core::ratelimit::decide(&hits, now, limit, window) {
+        let result = match kapigate_core::ratelimit::decide(&hits, now, limit, window) {
             RateDecision::Allow { hits } => {
                 map.insert(bucket.to_owned(), Entry { hits, last: now });
                 None

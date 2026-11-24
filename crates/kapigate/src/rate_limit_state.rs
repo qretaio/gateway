@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gateway_core::crd::{RateLimitEntry, RateLimitKeySource};
-use gateway_core::ratelimit::{RateLimitRule as StaticRateRule, build_key};
+use kapigate_core::crd::{RateLimitEntry, RateLimitKeySource};
+use kapigate_core::ratelimit::{RateLimitRule as StaticRateRule, build_key};
 use wirefilter::Filter;
 
 /// One compiled rule: the selector plus the counter posture and key
@@ -75,11 +75,11 @@ impl CompiledRateRule {
     /// everything; a field-set failure fails CLOSED (treat as a match so a
     /// scheme bug cannot silently skip a limit).
     #[must_use]
-    pub fn matches(&self, request: &gateway_core::waf::WafRequest<'_>) -> bool {
+    pub fn matches(&self, request: &kapigate_core::waf::WafRequest<'_>) -> bool {
         let Some(filter) = &self.filter else {
             return true;
         };
-        match gateway_core::waf::execution_context(request) {
+        match kapigate_core::waf::execution_context(request) {
             Ok(ctx) => filter.execute(&ctx).unwrap_or(true),
             Err(_) => true,
         }
@@ -192,7 +192,7 @@ fn compile_all(
                 None
             } else {
                 Some(Arc::new(
-                    gateway_core::waf::compile_expression(&entry.filter)
+                    kapigate_core::waf::compile_expression(&entry.filter)
                         .map_err(|e| format!("rate limit {}: {e}", entry.name))?,
                 ))
             };
@@ -294,7 +294,7 @@ mod tests {
             per_route: false,
             namespace: None,
         };
-        let req = gateway_core::waf::WafRequest::default();
+        let req = kapigate_core::waf::WafRequest::default();
         assert!(rule.matches(&req));
     }
 

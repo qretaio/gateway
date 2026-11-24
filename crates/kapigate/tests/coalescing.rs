@@ -12,8 +12,8 @@ use axum::{body::Body, extract::Request, response::Response};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
-use gateway::config::{GatewayConfig, KapiConfig, ListenConfig};
-use gateway::server::Gateway;
+use kapigate::config::{GatewayConfig, KapiConfig, ListenConfig};
+use kapigate::server::Gateway;
 
 fn hr(name: &str, host: &str) -> Value {
     json!({

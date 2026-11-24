@@ -27,7 +27,7 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-use gateway_core::routes::route_specificity;
+use kapigate_core::routes::route_specificity;
 use venndb::VennDB;
 
 /// One route row in the live index: one PATTERN (an app may carry
@@ -142,12 +142,12 @@ impl Family {
             Self::Httproutes => "/apis/gateway.networking.k8s.io/v1/httproutes".to_owned(),
             Self::WafRules => format!(
                 "/apis/{}/{}",
-                gateway_core::crd::GROUP_VERSION,
+                kapigate_core::crd::GROUP_VERSION,
                 Self::WafRules.plural()
             ),
             Self::RateLimits => format!(
                 "/apis/{}/{}",
-                gateway_core::crd::GROUP_VERSION,
+                kapigate_core::crd::GROUP_VERSION,
                 Self::RateLimits.plural()
             ),
             other => format!("/apis/kapi.qreta.io/v1alpha1/{}", other.plural()),
@@ -240,7 +240,7 @@ pub struct Table {
     /// (namespace, name) -> a WafRule CR's ordered rules. Keyed by the
     /// CR's metadata so a delta is a single map edit; the gateway folds
     /// every CR's rules (in name order) into the live compiled ruleset.
-    waf_rules: BTreeMap<(String, String), Vec<gateway_core::crd::WafRuleEntry>>,
+    waf_rules: BTreeMap<(String, String), Vec<kapigate_core::crd::WafRuleEntry>>,
     /// Bumped on every WafRules family delta. The serving face compares
     /// it against its last compile and recompiles only when the CR set
     /// actually changed — no work on the hot path when rules are static.
@@ -248,7 +248,7 @@ pub struct Table {
     /// (namespace, name) -> a RateLimit CR's ordered rules. Keyed by the
     /// CR's metadata so a delta is a single map edit; a rule's namespace
     /// is the scope in which it applies (the served route's namespace).
-    rate_limits: BTreeMap<(String, String), Vec<gateway_core::crd::RateLimitEntry>>,
+    rate_limits: BTreeMap<(String, String), Vec<kapigate_core::crd::RateLimitEntry>>,
     /// Bumped on every RateLimits family delta (generation-gated like WAF).
     rate_limits_generation: u64,
 }
@@ -266,11 +266,11 @@ pub struct PublicAssetsBinding {
     pub volume: Option<String>,
     /// Optional HTTPRoute name; absent = 404 on a non-asset path.
     pub http_route_ref: Option<String>,
-    pub not_found_handling: gateway_core::public_assets::NotFoundHandling,
+    pub not_found_handling: kapigate_core::public_assets::NotFoundHandling,
     /// url path (no leading slash) -> byte length, under public/.
     pub public_paths: BTreeMap<String, u64>,
     pub hashes: BTreeMap<String, String>,
-    pub header_rules: Vec<gateway_core::assets::HeaderRule>,
+    pub header_rules: Vec<kapigate_core::assets::HeaderRule>,
 }
 
 /// A registry credential: the shape the pull's Authorization header
@@ -503,12 +503,12 @@ impl Table {
     /// an identity. The TOML-configured rules are prepended by the caller
     /// (the gateway) so static rules run before watched ones.
     #[must_use]
-    pub fn waf_rules(&self) -> Vec<gateway_core::waf::WafRule> {
+    pub fn waf_rules(&self) -> Vec<kapigate_core::waf::WafRule> {
         self.waf_rules
             .values()
             .flatten()
             .filter(|r| !r.name.is_empty())
-            .map(|r| gateway_core::waf::WafRule {
+            .map(|r| kapigate_core::waf::WafRule {
                 name: r.name.clone(),
                 expression: r.expression.clone(),
                 action: r.action,
@@ -536,7 +536,7 @@ impl Table {
     /// needs an identity), and invalid numeric rules are skipped at the
     /// row parse seam so one bad CR cannot poison the set.
     #[must_use]
-    pub fn rate_limits(&self) -> Vec<(String, Vec<gateway_core::crd::RateLimitEntry>)> {
+    pub fn rate_limits(&self) -> Vec<(String, Vec<kapigate_core::crd::RateLimitEntry>)> {
         self.rate_limits
             .iter()
             .map(|((namespace, _), rules)| {
@@ -798,7 +798,7 @@ fn child_pull_token(
 /// binding — the kapi controller marks it not-ready. The status carries
 /// the resolved public/ paths + hashes + header rules.
 fn public_assets_row(object: &serde_json::Value) -> Option<(String, String, PublicAssetsBinding)> {
-    use gateway_core::public_assets::{PublicAssetsSpec, PublicAssetsStatus};
+    use kapigate_core::public_assets::{PublicAssetsSpec, PublicAssetsStatus};
     let org = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
     let spec: PublicAssetsSpec = serde_json::from_value(object.get("spec")?.clone()).ok()?;
@@ -833,19 +833,19 @@ fn public_assets_row(object: &serde_json::Value) -> Option<(String, String, Publ
 /// themselves are validated at compile time on the recompile seam.
 fn waf_rule_row(
     object: &serde_json::Value,
-) -> Option<(String, String, Vec<gateway_core::crd::WafRuleEntry>)> {
+) -> Option<(String, String, Vec<kapigate_core::crd::WafRuleEntry>)> {
     let namespace = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
-    let spec: gateway_core::crd::WafRuleSpec =
+    let spec: kapigate_core::crd::WafRuleSpec =
         serde_json::from_value(object.get("spec")?.clone()).ok()?;
     // A single CR carrying more rules than the WAF's compile cap is
     // rejected at the watch seam: keep the last-good ruleset rather than
     // letting one oversized row poison the whole combined set.
-    if spec.rules.len() > gateway_core::waf::MAX_RULES {
+    if spec.rules.len() > kapigate_core::waf::MAX_RULES {
         eprintln!(
             "[gateway] WafRule CR {namespace}/{name} carries {} rules (cap {}); ignored",
             spec.rules.len(),
-            gateway_core::waf::MAX_RULES
+            kapigate_core::waf::MAX_RULES
         );
         return None;
     }
@@ -858,12 +858,12 @@ fn waf_rule_row(
 /// cap are validated here; selectors are compiled on the recompile seam.
 fn rate_limit_row(
     object: &serde_json::Value,
-) -> Option<(String, String, Vec<gateway_core::crd::RateLimitEntry>)> {
+) -> Option<(String, String, Vec<kapigate_core::crd::RateLimitEntry>)> {
     let namespace = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
-    let spec: gateway_core::crd::RateLimitSpec =
+    let spec: kapigate_core::crd::RateLimitSpec =
         serde_json::from_value(object.get("spec")?.clone()).ok()?;
-    if spec.rules.len() > gateway_core::waf::MAX_RULES
+    if spec.rules.len() > kapigate_core::waf::MAX_RULES
         || spec.rules.iter().any(|r| r.validate().is_err())
     {
         eprintln!(

@@ -12,10 +12,10 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
-use gateway::config::{GatewayConfig, KapiConfig, ListenConfig, WafConfig};
-use gateway::server::Gateway;
-use gateway::table::Family;
-use gateway_core::ratelimit::{RateLimitConfig, RateLimitRule};
+use kapigate::config::{GatewayConfig, KapiConfig, ListenConfig, WafConfig};
+use kapigate::server::Gateway;
+use kapigate::table::Family;
+use kapigate_core::ratelimit::{RateLimitConfig, RateLimitRule};
 use serde_json::json;
 
 /// A mock node that counts every request it receives.

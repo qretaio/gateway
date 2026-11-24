@@ -1,5 +1,5 @@
 [package]
-name = "gateway-core"
+name = "kapigate-core"
 version = "0.1.0"
 edition = "2024"
 description = "The gateway layer pure laws: host route matcher, asset response law, edge cache store, inbound trim, WAF filter law, sliding-window rate-limit decision, verified-bot FCrDNS law. Zero I/O, forbid(unsafe)."

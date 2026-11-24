@@ -1,6 +1,6 @@
 //! The rate-limit law: a bounded sliding-window counter over request
 //! timestamps. Pure over plain data — the stateful, bounded store lives in
-//! the gateway crate ([`gateway::rate_state`]); this module owns only the
+//! the gateway crate ([`kapigate::rate_state`]); this module owns only the
 //! decision function and the config/verdict types, so the rule can be
 //! tested without a clock, a map, or a network.
 //!

@@ -10,9 +10,9 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
-use gateway::config::{GatewayConfig, KapiConfig, ListenConfig, WafConfig};
-use gateway::server::Gateway;
-use gateway::table::Family;
+use kapigate::config::{GatewayConfig, KapiConfig, ListenConfig, WafConfig};
+use kapigate::server::Gateway;
+use kapigate::table::Family;
 use serde_json::json;
 
 async fn mock_node(hits: Arc<AtomicUsize>) -> std::net::SocketAddr {
