@@ -119,7 +119,7 @@ impl AssetStore {
     /// the caller forwards (the worker may own the path, and
     /// `run_worker_first` apps never answer from the store at all).
     pub async fn serve(
-        &self,
+        self: &Arc<Self>,
         resolved: &crate::table::Resolved,
         method: &str,
         path: &str,
@@ -145,8 +145,36 @@ impl AssetStore {
         // without a second registry pull (same layout, same bytes).
         if let Some(tree) = self.read_disk(image, spec) {
             let answer = self.answer(&tree, path, query, req_headers);
-            self.trees.lock().unwrap().insert((org.clone(), app.clone()), tree);
-            if answer.is_some() { return answer; }
+            self.trees
+                .lock()
+                .unwrap()
+                .insert((org.clone(), app.clone()), tree);
+            // Stale-while-revalidate: serve the stale tree NOW, refresh
+            // in the background. The shared qreta-oci cache owns the TTL.
+            if self.disk.is_stale(image).unwrap_or(false) {
+                let owner = self.clone();
+                let image_owned = image.clone();
+                let spec_owned = spec.clone();
+                let org_owned = org.clone();
+                let registry = crate::oci::Reference::parse(image)
+                    .map(|r| r.registry)
+                    .unwrap_or_default();
+                let auth =
+                    secret_lookup(org, &registry).or_else(|| self.tokens.get(&registry).cloned());
+                tokio::spawn(async move {
+                    let lookup = |_: &str, _: &str| auth.clone();
+                    match owner
+                        .pull(&image_owned, &spec_owned, &org_owned, &lookup)
+                        .await
+                    {
+                        Ok(tree) => owner.write_disk(&tree, &image_owned),
+                        Err(e) => eprintln!("[gateway] SWR refresh {org_owned}/{image_owned}: {e}"),
+                    }
+                });
+            }
+            if answer.is_some() {
+                return answer;
+            }
         }
         {
             let trees = self.trees.lock().unwrap();
@@ -215,37 +243,60 @@ impl AssetStore {
 
     fn read_disk(&self, image: &str, spec: &kapigate_core::assets::AssetSpec) -> Option<Tree> {
         let path = self.disk.path(image).ok()?;
-        if !path.join(".wisolate-extracted").exists() { return None; }
-        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Arc<Vec<u8>>>) {
+        if !path.join(".wisolate-extracted").exists() {
+            return None;
+        }
+        fn walk(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            out: &mut BTreeMap<String, Arc<Vec<u8>>>,
+        ) {
             if let Ok(rd) = std::fs::read_dir(dir) {
                 for ent in rd.flatten() {
                     let p = ent.path();
-                    if p.is_dir() { walk(root, &p, out); }
-                    else if let Some(s) = p.strip_prefix(root).ok().and_then(|r| r.to_str())
+                    if p.is_dir() {
+                        walk(root, &p, out);
+                    } else if let Some(s) = p.strip_prefix(root).ok().and_then(|r| r.to_str())
                         && let Ok(bytes) = std::fs::read(&p)
-                    { out.insert(s.to_owned(), Arc::new(bytes)); }
+                    {
+                        out.insert(s.to_owned(), Arc::new(bytes));
+                    }
                 }
             }
         }
         let mut files = BTreeMap::new();
         walk(&path, &path, &mut files);
-        if files.is_empty() { return None; }
-        Some(Tree { image: image.to_owned(), files, spec: spec.clone() })
+        if files.is_empty() {
+            return None;
+        }
+        Some(Tree {
+            image: image.to_owned(),
+            files,
+            spec: spec.clone(),
+        })
     }
 
     fn write_disk(&self, tree: &Tree, digest: &str) {
-        let Ok(path) = self.disk.path(&tree.image) else { return; };
+        let Ok(path) = self.disk.path(&tree.image) else {
+            return;
+        };
         let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         for (rel, bytes) in &tree.files {
-            if rel.split('/').any(|s| s == "..") { continue; }
+            if rel.split('/').any(|s| s == "..") {
+                continue;
+            }
             let target = tmp.join(rel);
-            if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let _ = std::fs::write(target, bytes.as_ref());
         }
         let _ = std::fs::write(tmp.join(".hash"), digest.as_bytes());
         let _ = std::fs::write(tmp.join(".wisolate-extracted"), b"");
-        if path.exists() { let _ = std::fs::remove_dir_all(&path); }
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
         let _ = std::fs::rename(&tmp, &path);
     }
     /// Pull the artifact and extract the asset tree: the manifest (or

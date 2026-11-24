@@ -601,7 +601,7 @@ async fn the_asset_store_pulls_and_serves_the_tree() {
     let registry_addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let store = AssetStore::new(Default::default());
+    let store = std::sync::Arc::new(AssetStore::new(Default::default()));
     let spec = json!({
         "not_found_handling": "none",
         "files": {"index.html": 15},

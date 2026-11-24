@@ -48,7 +48,7 @@ pub struct Gateway {
     pub config: GatewayConfig,
     pub informer: Informer,
     pub cache: EdgeCache,
-    pub assets: crate::assets_store::AssetStore,
+    pub assets: std::sync::Arc<crate::assets_store::AssetStore>,
     /// The drain machinery (kapi.spec EDGE-FR-010's first land): every
     /// in-flight request holds a guard; the barrier waits them out.
     pub drain: graceful_handover::GracefulShutdown,
@@ -132,7 +132,7 @@ impl Gateway {
         Self {
             informer: Informer::new(&kapi_url),
             cache: EdgeCache::default(),
-            assets: crate::assets_store::AssetStore::new(registry),
+            assets: std::sync::Arc::new(crate::assets_store::AssetStore::new(registry)),
             drain: graceful_handover::GracefulShutdown::new(),
             coalescer: Merger::new(),
             // The forward client NEVER follows redirects: the node's

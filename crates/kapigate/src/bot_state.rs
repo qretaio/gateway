@@ -18,9 +18,9 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use kapigate_core::verified_bot::VerifiedBotConfig;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::{RData, RecordType};
+use kapigate_core::verified_bot::VerifiedBotConfig;
 
 struct CacheEntry {
     verified: bool,
