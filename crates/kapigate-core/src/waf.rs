@@ -565,6 +565,7 @@ impl WafRules {
             }
         };
 
+        let mut hardening: Option<WafVerdict> = None;
         for compiled in self.rules.iter() {
             let (matched, failure) = match compiled.filter.execute(&ctx) {
                 Ok(v) => (v, None),
@@ -575,10 +576,16 @@ impl WafRules {
             };
             if matched {
                 if compiled.action == WafAction::Hardening {
-                    return WafVerdict::Hardening {
-                        rule: compiled.name.clone(),
-                        headers: compiled.headers.clone(),
-                    };
+                    // First matching Hardening rule owns the header
+                    // overrides, but evaluation continues so a later
+                    // Block or Challenge rule is never bypassed.
+                    if hardening.is_none() {
+                        hardening = Some(WafVerdict::Hardening {
+                            rule: compiled.name.clone(),
+                            headers: compiled.headers.clone(),
+                        });
+                    }
+                    continue;
                 }
                 let status = match compiled.action {
                     WafAction::Block => compiled.status,
@@ -600,7 +607,28 @@ impl WafRules {
                 };
             }
         }
-        WafVerdict::Allow
+        hardening.unwrap_or(WafVerdict::Allow)
+    }
+
+    /// Evaluate only `Hardening` rules (first match wins), skipping
+    /// `Block`/`Challenge` actions. Used for verified bots and solved PoW
+    /// clients that bypass blocking rules yet still need route-specific
+    /// response headers (such as per-app CSP overrides).
+    #[must_use]
+    pub fn hardening_only(&self, request: &WafRequest<'_>) -> Option<Vec<(String, String)>> {
+        if self.rules.is_empty() {
+            return None;
+        }
+        let ctx = execution_context(request).ok()?;
+        for compiled in self.rules.iter() {
+            if compiled.action != WafAction::Hardening {
+                continue;
+            }
+            if matches!(compiled.filter.execute(&ctx), Ok(true)) {
+                return Some(compiled.headers.clone());
+            }
+        }
+        None
     }
 }
 
@@ -916,5 +944,40 @@ mod tests {
     fn compiled_rules_are_send_and_sync_for_sharing_across_tasks() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WafRules>();
+    }
+
+    #[test]
+    fn hardening_rule_does_not_skip_later_block_rule_and_hardening_only_finds_headers() {
+        let hardening = WafRule {
+            name: "app-csp".to_owned(),
+            expression: r#"http.host == "orders.example.com""#.to_owned(),
+            action: WafAction::Hardening,
+            headers: vec![(
+                "content-security-policy".to_owned(),
+                "default-src 'self' 'unsafe-inline'".to_owned(),
+            )],
+            ..Default::default()
+        };
+        let block = rule("no-scanners", r#"http.ua contains "sqlmap""#);
+        let rules = WafRules::compile(&[hardening, block]).unwrap();
+
+        let blocked = rules.evaluate(&request("GET", "/", "sqlmap/1.0"));
+        assert!(blocked.is_blocked());
+        assert_eq!(blocked.rule(), Some("no-scanners"));
+
+        let allowed = rules.evaluate(&request("GET", "/", "Mozilla/5.0"));
+        assert!(!allowed.is_blocked());
+        assert_eq!(allowed.rule(), Some("app-csp"));
+
+        let headers = rules
+            .hardening_only(&request("GET", "/", "sqlmap/1.0"))
+            .unwrap();
+        assert_eq!(
+            headers,
+            vec![(
+                "content-security-policy".to_owned(),
+                "default-src 'self' 'unsafe-inline'".to_owned()
+            )]
+        );
     }
 }

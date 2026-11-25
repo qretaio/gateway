@@ -435,12 +435,20 @@ impl Gateway {
         // Verified bots keep their exemption from CONFIGURABLE rules
         // (empty watched set here); the built-in private-path deny still
         // runs inside `evaluate` either way.
-        let waf_rules = if verified_bot || pow_solved {
-            self.waf.builtin_only()
+        let verdict = if verified_bot || pow_solved {
+            if let Some(headers) = self
+                .waf
+                .rules(&watched_waf, watched_waf_gen)
+                .hardening_only(&waf_request)
+            {
+                *overrides = Some(headers);
+            }
+            self.waf.builtin_only().evaluate(&waf_request)
         } else {
-            self.waf.rules(&watched_waf, watched_waf_gen)
+            self.waf
+                .rules(&watched_waf, watched_waf_gen)
+                .evaluate(&waf_request)
         };
-        let verdict = waf_rules.evaluate(&waf_request);
         if let kapigate_core::waf::WafVerdict::Hardening { headers, .. } = &verdict {
             *overrides = Some(headers.clone());
         }

@@ -407,12 +407,24 @@ async fn pow_challenge_is_issued_and_a_solution_bypasses_it() {
     let hits = Arc::new(AtomicUsize::new(0));
     let node = mock_node(Arc::clone(&hits)).await;
     let mut cfg = config("http://127.0.0.1:1", node, vec![]);
-    cfg.waf.rules = vec![WafRule {
-        name: "bot-check".into(),
-        expression: r#"http.ua contains "bot""#.into(),
-        action: WafAction::Challenge,
-        ..Default::default()
-    }];
+    cfg.waf.rules = vec![
+        WafRule {
+            name: "app-csp".into(),
+            expression: r#"http.host == "orders.example.com""#.into(),
+            action: WafAction::Hardening,
+            headers: vec![(
+                "content-security-policy".into(),
+                "default-src 'self'; script-src 'self' 'sha256-abc='".into(),
+            )],
+            ..Default::default()
+        },
+        WafRule {
+            name: "bot-check".into(),
+            expression: r#"http.ua contains "bot""#.into(),
+            action: WafAction::Challenge,
+            ..Default::default()
+        },
+    ];
     cfg.pow = PowConfig {
         secret: "test-secret".into(),
         difficulty: 4,
@@ -459,6 +471,13 @@ async fn pow_challenge_is_issued_and_a_solution_bypasses_it() {
         hits.load(Ordering::SeqCst),
         1,
         "solved bot reached the node"
+    );
+    // PoW-solved clients skip CONFIGURABLE blocking rules, but they must
+    // still get the per-app CSP override — otherwise inline scripts that
+    // the rule allows are blocked by the gateway's strict default-src.
+    assert_eq!(
+        passed.headers()["content-security-policy"],
+        "default-src 'self'; script-src 'self' 'sha256-abc='"
     );
 }
 
@@ -581,4 +600,37 @@ async fn upstream_content_security_policy_is_preserved() {
         "strict-origin-when-cross-origin",
         "missing hardening headers are still filled"
     );
+}
+
+/// A matching `Hardening` rule does not short-circuit later `Block` rules:
+/// scanners are still blocked even on hosts that override CSP.
+#[tokio::test]
+async fn hardening_rule_does_not_bypass_later_block_rule() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let node = mock_node(Arc::clone(&hits)).await;
+    let rules = vec![
+        WafRule {
+            name: "app-csp".into(),
+            expression: r#"http.host == "orders.example.com""#.into(),
+            action: WafAction::Hardening,
+            headers: vec![(
+                "content-security-policy".into(),
+                "default-src 'self' 'unsafe-inline'".into(),
+            )],
+            ..Default::default()
+        },
+        rule("no-scanners", r#"http.ua contains "sqlmap""#),
+    ];
+    let (addr, _gw) = boot(config("http://127.0.0.1:1", node, rules)).await;
+
+    let blocked = reqwest::Client::new()
+        .get(format!("http://{addr}/"))
+        .header("host", "orders.example.com")
+        .header("user-agent", "sqlmap/1.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(blocked.headers()["x-qreta-waf"], "no-scanners");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
 }

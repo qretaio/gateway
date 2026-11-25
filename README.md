@@ -207,9 +207,13 @@ spec:
 ```
 
 Hardening rules are evaluated in the same ordered ruleset as block/challenge
-rules — the first match wins, so place them before any broader block that
-would otherwise catch the request. The override is applied AFTER the global
-hardening pass, and a suppressed header stays absent (it is not re-stamped).
+rules. A matching hardening rule owns the header overrides (first match wins)
+but no longer short-circuits evaluation: a later Block/Challenge rule still
+fires. The override is applied AFTER the global hardening pass, and a
+suppressed header stays absent (it is not re-stamped). Verified bots and
+PoW-solved clients skip configurable Block/Challenge rules but still get
+hardening overrides, so per-app CSP (e.g. hash-allowlisted inline scripts) is
+not silently replaced by the gateway's strict default-src for those clients.
 
 A CR with no `spec.rules` is inert. The wire types live in
 `gateway-core::crd` (`WafRuleSpec`, `WafRuleEntry`, `WafRuleStatus`);
