@@ -108,6 +108,9 @@ pub enum Family {
     /// Transitional: the old plural still holds rows until the migration
     /// moves them to AssetsOnlyApp instances. Reads into the same map.
     LegacyPublicAssets,
+    /// FunctionApp instances (wisolate.qreta.io): routes ride directly on
+    /// spec.routes; kapigate sends traffic to the node (backend circle).
+    FunctionApps,
     /// Typed WafRule CRs (gateway.qreta.io): the gateway's own WAF rules,
     /// watched from kapi and compiled into the live wirefilter ruleset.
     /// The CR set is the dynamic half of the WAF; the TOML `[[waf.rules]]`
@@ -130,6 +133,7 @@ impl Family {
             Self::Secrets => "secrets",
             Self::AssetsOnlyApp => "assetsonlyapps",
             Self::LegacyPublicAssets => "publicassets",
+            Self::FunctionApps => "functionapps",
             Self::WafRules => "wafrules",
             Self::RateLimits => "ratelimits",
         }
@@ -154,6 +158,7 @@ impl Family {
                 kapigate_core::crd::GROUP_VERSION,
                 Self::RateLimits.plural()
             ),
+            Self::FunctionApps => "/apis/kapi.qreta.io/v1alpha1/functionapps".to_owned(),
             other => format!("/apis/kapi.qreta.io/v1alpha1/{}", other.plural()),
         }
     }
@@ -373,6 +378,7 @@ impl Table {
             Family::Nodes => self.node_rows.clear(),
             Family::Secrets => self.secrets.clear(),
             Family::AssetsOnlyApp | Family::LegacyPublicAssets => self.assets_only_apps.clear(),
+            Family::FunctionApps => self.routes.clear(),
             Family::WafRules => self.waf_rules.clear(),
             Family::RateLimits => self.rate_limits.clear(),
             Family::Kapinodes => return,
@@ -396,6 +402,16 @@ impl Table {
             Family::Kapinodes => {}
             Family::Httproutes => {
                 let Some((org, app, entry)) = httproute_row(family, object) else {
+                    return;
+                };
+                if entry.patterns.is_empty() {
+                    self.routes.remove(&(org, app));
+                } else {
+                    self.routes.insert((org, app), entry);
+                }
+            }
+            Family::FunctionApps => {
+                let Some((org, app, entry)) = function_app_row(family, object) else {
                     return;
                 };
                 if entry.patterns.is_empty() {
@@ -452,6 +468,11 @@ impl Table {
             Family::Kapinodes => {}
             Family::Httproutes => {
                 if let Some((org, app, _)) = httproute_row(family, object) {
+                    self.routes.remove(&(org, app));
+                }
+            }
+            Family::FunctionApps => {
+                if let Some((org, app, _)) = function_app_row(family, object) {
                     self.routes.remove(&(org, app));
                 }
             }
@@ -887,6 +908,31 @@ fn rate_limit_row(
 /// app), falling back to metadata.name. Asset fields are absent — the
 /// gateway builds on route manifests only; asset pulls resolve through
 /// the controller's own path.
+/// A FunctionApp instance -> (org, app, route entry). `spec.routes` are
+/// "host/path" strings; patterns come straight from them. No backendRef:
+/// kapigate routes to the node (the backend circle) via its default node.
+fn function_app_row(family: Family, object: &serde_json::Value) -> Option<(String, String, AppEntry)> {
+    let org = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
+    let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
+    let routes = object.get("spec")?.get("routes")?.as_array()?;
+    let mut hostnames = Vec::new();
+    let mut patterns = Vec::new();
+    for r in routes.iter().filter_map(|r| r.as_str()) {
+        let (host, path) = match r.split_once('/') {
+            Some((h, p)) => (h.to_owned(), format!("/{}", p)),
+            None => (r.to_owned(), "/".to_owned()),
+        };
+        if !hostnames.contains(&host) { hostnames.push(host); }
+        if !patterns.contains(&path) { patterns.push(path); }
+    }
+    if patterns.is_empty() { return None; }
+    Some((org, name.clone(), AppEntry {
+        family,
+        patterns,
+        fingerprint: None,
+        route_names: std::collections::BTreeSet::from([name]),
+    }))
+}
 fn httproute_row(family: Family, object: &serde_json::Value) -> Option<(String, String, AppEntry)> {
     let org = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let app = object
@@ -1268,6 +1314,19 @@ mod tests {
         assert_eq!(r.cache_scope().as_deref(), Some("acme/orders/fp-7"));
     }
 
+    #[test]
+    fn a_backendless_route_uses_the_default_node() {
+        let mut t = Table::default();
+        let mut route = hr_ns("mgmt", "id-auth.qreta.io", &["auth.qreta.io"]);
+        route["spec"]["rules"][0].as_object_mut().unwrap().remove("backendRefs");
+        t.apply(Family::Httproutes, "ADDED", &route);
+        t.apply(Family::Nodes, "ADDED", &json!({
+            "metadata": {"name": "wisolate-node"},
+            "status": {"addresses": [{"type":"InternalIP","address":"127.0.0.1:8789"}]}
+        }));
+        let r = t.resolve("auth.qreta.io", "/auth/google/start", |_, row| row.and_then(|l| l.first()).cloned(), Some("wisolate-node"));
+        assert!(r.is_some(), "route must resolve");
+    }
     #[test]
     fn a_node_row_address_serves_when_the_map_is_silent() {
         let mut t = seed();
