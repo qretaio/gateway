@@ -1,5 +1,5 @@
-//! The PublicAssets CRD's wire types (the gateway's asset source of
-//! truth). A `PublicAssets` row binds a `public/` virtual filesystem to
+//! The AssetsOnlyApp RGD's wire types (the gateway's asset source of
+//! truth). A `AssetsOnlyApp` row binds a `public/` virtual filesystem to
 //! an optional HTTPRoute backend: a request whose path is in
 //! `status.public_paths` is served from that tree; otherwise the
 //! referenced HTTPRoute's backend handles it — or a 404 when no route
@@ -30,10 +30,10 @@ pub enum NotFoundHandling {
     SinglePageApplication,
 }
 
-/// The PublicAssets spec. Exactly one of `oci` / `volume` is valid.
+/// The AssetsOnlyApp spec. Exactly one of `oci` / `volume` is valid.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PublicAssetsSpec {
+pub struct AssetsOnlyAppSpec {
     /// An OCI image ref whose `public/` tree holds the assets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci: Option<String>,
@@ -49,7 +49,7 @@ pub struct PublicAssetsSpec {
     pub not_found_handling: NotFoundHandling,
 }
 
-impl PublicAssetsSpec {
+impl AssetsOnlyAppSpec {
     /// The exactly-one-of validation law.
     #[must_use]
     pub fn valid(&self) -> bool {
@@ -68,11 +68,11 @@ impl PublicAssetsSpec {
 }
 
 /// The resolved asset facts the gateway serves from. Populated by the
-/// kapi PublicAssets controller (wisolate writes the spec, kapi resolves
+/// no controller (definition-only RGD) (wisolate writes the spec, kapi resolves
 /// the tree into these facts). The gateway is read-only on these.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PublicAssetsStatus {
+pub struct AssetsOnlyAppStatus {
     /// url path (no leading slash) -> byte length, under `public/`.
     #[serde(default)]
     pub public_paths: BTreeMap<String, u64>,
@@ -93,22 +93,22 @@ mod tests {
 
     #[test]
     fn exactly_one_of_oci_or_volume() {
-        let oci = PublicAssetsSpec {
+        let oci = AssetsOnlyAppSpec {
             oci: Some("ghcr.io/a/b:sha".to_owned()),
             volume: None,
             ..Default::default()
         };
         assert!(oci.valid());
         assert_eq!(oci.source_kind(), "oci");
-        let vol = PublicAssetsSpec {
+        let vol = AssetsOnlyAppSpec {
             volume: Some("my-vol".to_owned()),
             ..Default::default()
         };
         assert!(vol.valid());
         assert_eq!(vol.source_kind(), "volume");
-        let neither = PublicAssetsSpec::default();
+        let neither = AssetsOnlyAppSpec::default();
         assert!(!neither.valid());
-        let both = PublicAssetsSpec {
+        let both = AssetsOnlyAppSpec {
             oci: Some("x".to_owned()),
             volume: Some("y".to_owned()),
             ..Default::default()
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn route_ref_is_optional_and_default_handling_is_none() {
-        let s: PublicAssetsSpec = serde_json::from_str(r#"{"volume":"v"}"#).expect("parses");
+        let s: AssetsOnlyAppSpec = serde_json::from_str(r#"{"volume":"v"}"#).expect("parses");
         assert_eq!(s.http_route_ref, None);
         assert_eq!(s.not_found_handling, NotFoundHandling::None);
     }

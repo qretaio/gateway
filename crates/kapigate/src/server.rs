@@ -554,12 +554,12 @@ impl Gateway {
         let Some((resolved, addr)) = resolved else {
             return plain(404, "not found\n");
         };
-        // A PublicAssets CR with NO httpRouteRef has no backend: a path
+        // A AssetsOnlyApp CR with NO httpRouteRef has no backend: a path
         // that missed public/ is a 404, not a worker forward. With a
         // route ref, the matched route's backend (addr) handles it — the
         // asset-first, worker-fallback law.
         if resolved
-            .public_assets
+            .assets_only_apps
             .as_ref()
             .is_some_and(|b| b.http_route_ref.is_none())
         {

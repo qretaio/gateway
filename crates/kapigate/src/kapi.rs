@@ -23,7 +23,7 @@ use crate::table::{Family, Table};
 /// families: kapi is blind to those kinds (the k8s model).
 pub const FAMILIES: [Family; 8] = [
     Family::Httproutes,
-    Family::PublicAssets,
+    Family::AssetsOnlyApp,
     Family::WafRules,
     Family::RateLimits,
     Family::Pods,

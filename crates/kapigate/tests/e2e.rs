@@ -619,7 +619,7 @@ async fn the_asset_store_pulls_and_serves_the_tree() {
         fingerprint: None,
         image: Some(image.clone()),
         assets: Some(spec.clone()),
-        public_assets: None,
+        assets_only_app: None,
     };
     let resp = store
         .serve(

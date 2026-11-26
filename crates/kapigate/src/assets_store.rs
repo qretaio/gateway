@@ -257,9 +257,20 @@ impl AssetStore {
                     if p.is_dir() {
                         walk(root, &p, out);
                     } else if let Some(s) = p.strip_prefix(root).ok().and_then(|r| r.to_str())
+                        && !matches!(
+                            s,
+                            ".wisolate-extracted" | ".hash" | "script.js" | "app.wasm"
+                        )
+                        && !s.starts_with("migrations/")
                         && let Ok(bytes) = std::fs::read(&p)
                     {
-                        out.insert(s.to_owned(), Arc::new(bytes));
+                        let rel = s
+                            .strip_prefix("assets/")
+                            .or_else(|| s.strip_prefix("public/"))
+                            .unwrap_or(s);
+                        if !rel.is_empty() {
+                            out.insert(rel.to_owned(), Arc::new(bytes));
+                        }
                     }
                 }
             }
@@ -436,7 +447,7 @@ impl AssetStore {
                     .to_string_lossy()
                     .into_owned();
                 // Both roots strip: the node's version tree uses
-                // `assets/`, a typed PublicAssets source uses `public/`.
+                // `assets/`, a typed AssetsOnlyApp source uses `public/`.
                 // Either way the tree addresses files rel to that root.
                 let rel = path
                     .strip_prefix("assets/")

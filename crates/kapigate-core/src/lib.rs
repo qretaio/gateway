@@ -24,7 +24,7 @@ pub mod cache;
 pub mod crd;
 pub mod headers;
 pub mod pow;
-pub mod public_assets;
+pub mod assets_only_app;
 pub mod ratelimit;
 pub mod routes;
 pub mod trim;

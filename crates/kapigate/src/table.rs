@@ -101,10 +101,10 @@ pub enum Family {
     /// (the asset store's per-app pulls, the kubelet's child env)
     /// resolve through [`Table::registry_auth`].
     Secrets,
-    /// Typed PublicAssets CRs (kapi.qreta.io): a public/ virtual FS and
+    /// Typed AssetsOnlyApp CRs (kapi.qreta.io): a public/ virtual FS and
     /// an optional HTTPRoute backend. Consulted BEFORE the HTTPRoute
     /// fallback for every request path.
-    PublicAssets,
+    AssetsOnlyApp,
     /// Typed WafRule CRs (gateway.qreta.io): the gateway's own WAF rules,
     /// watched from kapi and compiled into the live wirefilter ruleset.
     /// The CR set is the dynamic half of the WAF; the TOML `[[waf.rules]]`
@@ -125,7 +125,7 @@ impl Family {
             Self::Nodes => "nodes",
             Self::Kapinodes => "kapinodes",
             Self::Secrets => "secrets",
-            Self::PublicAssets => "publicassets",
+            Self::AssetsOnlyApp => "assetsonlyapps",
             Self::WafRules => "wafrules",
             Self::RateLimits => "ratelimits",
         }
@@ -187,9 +187,9 @@ pub struct Resolved {
     /// pull ref and law input.
     pub image: Option<String>,
     pub assets: Option<crate::AssetSpec>,
-    /// The PublicAssets binding for this (org, app), when one exists.
+    /// The AssetsOnlyApp binding for this (org, app), when one exists.
     /// `server.rs` consults it BEFORE the HTTPRoute backend fallback.
-    pub public_assets: Option<PublicAssetsBinding>,
+    pub assets_only_apps: Option<AssetsOnlyAppBinding>,
 }
 
 impl Resolved {
@@ -211,9 +211,10 @@ struct AppEntry {
     family: Family,
     patterns: Vec<String>,
     fingerprint: Option<String>,
-    /// The HttpRoute's metadata.name — a PublicAssets CR's
-    /// http_route_ref joins on this.
-    route_name: Option<String>,
+    /// The HttpRoute metadata.names pointing at this (org, app) — an
+    /// AssetsOnlyApp CR's `httpRouteRef` joins against any of them so
+    /// sibling HTTPRoutes for the same backend never clobber one another.
+    route_names: BTreeSet<String>,
 }
 
 /// The table. BTreeMap/BTreeSet everywhere: the resolution tie-break is
@@ -234,9 +235,9 @@ pub struct Table {
     /// (namespace, name) -> the raw Secret body (the dockerconfigjson
     /// pull credentials' namespace rules, parsed at resolve time).
     secrets: BTreeMap<(String, String), serde_json::Value>,
-    /// (org, name) -> a PublicAssets CR's resolved binding. Keyed by the
+    /// (org, name) -> a AssetsOnlyApp CR's resolved binding. Keyed by the
     /// CR's own metadata name; `http_route_ref` names the fallback route.
-    public_assets: BTreeMap<(String, String), PublicAssetsBinding>,
+    assets_only_apps: BTreeMap<(String, String), AssetsOnlyAppBinding>,
     /// (namespace, name) -> a WafRule CR's ordered rules. Keyed by the
     /// CR's metadata so a delta is a single map edit; the gateway folds
     /// every CR's rules (in name order) into the live compiled ruleset.
@@ -253,11 +254,11 @@ pub struct Table {
     rate_limits_generation: u64,
 }
 
-/// The gateway's view of a PublicAssets CR: the OCI/volume source, the
+/// The gateway's view of a AssetsOnlyApp CR: the OCI/volume source, the
 /// resolved public paths/hashes/header rules, and the optional route
 /// whose backend handles non-asset paths.
 #[derive(Debug, Clone)]
-pub struct PublicAssetsBinding {
+pub struct AssetsOnlyAppBinding {
     pub org: String,
     pub name: String,
     /// OCI image ref (mutually exclusive with volume).
@@ -266,7 +267,7 @@ pub struct PublicAssetsBinding {
     pub volume: Option<String>,
     /// Optional HTTPRoute name; absent = 404 on a non-asset path.
     pub http_route_ref: Option<String>,
-    pub not_found_handling: kapigate_core::public_assets::NotFoundHandling,
+    pub not_found_handling: kapigate_core::assets_only_app::NotFoundHandling,
     /// url path (no leading slash) -> byte length, under public/.
     pub public_paths: BTreeMap<String, u64>,
     pub hashes: BTreeMap<String, String>,
@@ -367,7 +368,7 @@ impl Table {
             Family::Pods => self.pods.clear(),
             Family::Nodes => self.node_rows.clear(),
             Family::Secrets => self.secrets.clear(),
-            Family::PublicAssets => self.public_assets.clear(),
+            Family::AssetsOnlyApp => self.assets_only_apps.clear(),
             Family::WafRules => self.waf_rules.clear(),
             Family::RateLimits => self.rate_limits.clear(),
             Family::Kapinodes => return,
@@ -421,11 +422,11 @@ impl Table {
                 };
                 self.secrets.insert((namespace, name), object.clone());
             }
-            Family::PublicAssets => {
-                let Some((org, name, binding)) = public_assets_row(object) else {
+            Family::AssetsOnlyApp => {
+                let Some((org, name, binding)) = assets_only_app_row(object) else {
                     return;
                 };
-                self.public_assets.insert((org, name), binding);
+                self.assets_only_apps.insert((org, name), binding);
             }
             Family::WafRules => {
                 let Some((namespace, name, rules)) = waf_rule_row(object) else {
@@ -471,9 +472,9 @@ impl Table {
                     self.secrets.remove(&(namespace, name));
                 }
             }
-            Family::PublicAssets => {
-                if let Some((org, name, _)) = public_assets_row(object) {
-                    self.public_assets.remove(&(org, name));
+            Family::AssetsOnlyApp => {
+                if let Some((org, name, _)) = assets_only_app_row(object) {
+                    self.assets_only_apps.remove(&(org, name));
                 }
             }
             Family::WafRules => {
@@ -622,19 +623,18 @@ impl Table {
             }
             None => (None, None),
         };
-        // The PublicAssets join: a CR in this org whose http_route_ref
+        // The AssetsOnlyApp join: a CR in this org whose http_route_ref
         // names this HttpRoute (or whose name is the app) binds the
         // public/ tree consulted BEFORE the route's backend.
         let binding = self
-            .public_assets
+            .assets_only_apps
             .iter()
             .find(|((pa_org, pa_name), pa)| {
                 pa_org == org
                     && (pa
                         .http_route_ref
                         .as_deref()
-                        .zip(entry.route_name.as_deref())
-                        .is_some_and(|(r, n)| r == n)
+                        .is_some_and(|r| entry.route_names.contains(r))
                         || pa_name == app)
             })
             .map(|(_, pa)| pa.clone());
@@ -646,14 +646,14 @@ impl Table {
                 fingerprint: entry.fingerprint.clone(),
                 image: binding.as_ref().and_then(|b| b.oci.clone()),
                 assets: binding.as_ref().map(|b| crate::AssetSpec {
-                    // PublicAssets serves assets first; there is no
+                    // AssetsOnlyApp serves assets first; there is no
                     // run_worker_first flag — the route backend is the
                     // fallback, expressed by http_route_ref.
                     run_worker_first: false,
                     hashes: b.hashes.clone(),
                     header_rules: b.header_rules.clone(),
                 }),
-                public_assets: binding,
+                assets_only_apps: binding,
             },
             addr,
         ))
@@ -793,19 +793,19 @@ fn child_pull_token(
     None
 }
 
-/// A typed PublicAssets CR -> (org, name, binding). The spec's oci/volume
+/// A typed AssetsOnlyApp CR -> (org, name, binding). The spec's oci/volume
 /// are mutually exclusive; an invalid row (both/neither) contributes no
 /// binding — the kapi controller marks it not-ready. The status carries
 /// the resolved public/ paths + hashes + header rules.
-fn public_assets_row(object: &serde_json::Value) -> Option<(String, String, PublicAssetsBinding)> {
-    use kapigate_core::public_assets::{PublicAssetsSpec, PublicAssetsStatus};
+fn assets_only_app_row(object: &serde_json::Value) -> Option<(String, String, AssetsOnlyAppBinding)> {
+    use kapigate_core::assets_only_app::{AssetsOnlyAppSpec, AssetsOnlyAppStatus};
     let org = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
-    let spec: PublicAssetsSpec = serde_json::from_value(object.get("spec")?.clone()).ok()?;
+    let spec: AssetsOnlyAppSpec = serde_json::from_value(object.get("spec")?.clone()).ok()?;
     if !spec.valid() {
         return None;
     }
-    let status: PublicAssetsStatus = object
+    let status: AssetsOnlyAppStatus = object
         .get("status")
         .cloned()
         .and_then(|s| serde_json::from_value(s).ok())
@@ -813,7 +813,7 @@ fn public_assets_row(object: &serde_json::Value) -> Option<(String, String, Publ
     Some((
         org.clone(),
         name.clone(),
-        PublicAssetsBinding {
+        AssetsOnlyAppBinding {
             org,
             name,
             oci: spec.oci,
@@ -889,12 +889,13 @@ fn httproute_row(family: Family, object: &serde_json::Value) -> Option<(String, 
         .or_else(|| object.pointer("/metadata/name")?.as_str())?
         .to_owned();
     // Asset data no longer rides the route as an annotation — it lives
-    // in a typed PublicAssets CR. The route's metadata.name is the join
+    // in a typed AssetsOnlyApp CR. The route's metadata.name is the join
     // key a CR's httpRouteRef names.
-    let route_name = object
+    let route_names = object
         .pointer("/metadata/name")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(|s| BTreeSet::from([s.to_owned()]))
+        .unwrap_or_default();
     let mut entry = AppEntry {
         family,
         patterns: Vec::new(),
@@ -902,7 +903,7 @@ fn httproute_row(family: Family, object: &serde_json::Value) -> Option<(String, 
             .pointer("/metadata/annotations/kapi.qreta.io~1fingerprint")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        route_name,
+        route_names,
     };
     let hosts: Vec<&str> = object
         .pointer("/spec/hostnames")
@@ -1121,17 +1122,17 @@ mod tests {
     }
 
     #[test]
-    fn the_public_assets_cr_joins_the_route() {
+    fn the_assets_only_apps_cr_joins_the_route() {
         let mut t = Table::default();
         t.apply(
             Family::Httproutes,
             "ADDED",
             &hr("orders", &["orders.example.com"]),
         );
-        // A PublicAssets CR whose http_route_ref names the route's
+        // A AssetsOnlyApp CR whose http_route_ref names the route's
         // metadata.name ("orders") supplies the public/ tree.
         t.apply(
-            Family::PublicAssets,
+            Family::AssetsOnlyApp,
             "ADDED",
             &json!({
                 "metadata": {"name": "orders-assets", "namespace": "acme"},
@@ -1144,17 +1145,17 @@ mod tests {
             .resolve("orders.example.com", "/", addr_map(), None)
             .unwrap();
         assert_eq!(r.image.as_deref(), Some("ghcr.io/qretaio/orders:sha"));
-        let spec = r.assets.expect("the PublicAssets spec reaches the gateway");
+        let spec = r.assets.expect("the AssetsOnlyApp spec reaches the gateway");
         assert_eq!(
             spec.hashes.get("index.html").map(String::as_str),
             Some("abc")
         );
         assert!(!spec.run_worker_first);
-        assert!(r.public_assets.is_some());
+        assert!(r.assets_only_apps.is_some());
     }
 
     #[test]
-    fn a_public_assets_cr_without_route_ref_has_no_backend() {
+    fn a_assets_only_apps_cr_without_route_ref_has_no_backend() {
         let mut t = Table::default();
         t.apply(
             Family::Httproutes,
@@ -1162,7 +1163,7 @@ mod tests {
             &hr("orders", &["orders.example.com"]),
         );
         t.apply(
-            Family::PublicAssets,
+            Family::AssetsOnlyApp,
             "ADDED",
             &json!({
                 "metadata": {"name": "orders", "namespace": "acme"},
@@ -1173,7 +1174,7 @@ mod tests {
         let (r, _) = t
             .resolve("orders.example.com", "/", addr_map(), None)
             .unwrap();
-        let binding = r.public_assets.expect("the CR joined by app name");
+        let binding = r.assets_only_apps.expect("the CR joined by app name");
         assert_eq!(binding.http_route_ref, None);
         assert_eq!(binding.volume.as_deref(), Some("orders-vol"));
     }
