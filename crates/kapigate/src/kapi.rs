@@ -21,9 +21,10 @@ use crate::table::{Family, Table};
 /// reconciles its rows. Routes come ONLY from typed Gateway API
 /// HttpRoutes (built by the wisolate controller) — no app/worker
 /// families: kapi is blind to those kinds (the k8s model).
-pub const FAMILIES: [Family; 8] = [
+pub const FAMILIES: [Family; 9] = [
     Family::Httproutes,
     Family::AssetsOnlyApp,
+    Family::LegacyPublicAssets,
     Family::WafRules,
     Family::RateLimits,
     Family::Pods,

@@ -20,11 +20,11 @@
 #![forbid(unsafe_code)]
 
 pub mod assets;
+pub mod assets_only_app;
 pub mod cache;
 pub mod crd;
 pub mod headers;
 pub mod pow;
-pub mod assets_only_app;
 pub mod ratelimit;
 pub mod routes;
 pub mod trim;

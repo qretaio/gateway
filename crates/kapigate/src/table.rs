@@ -105,6 +105,9 @@ pub enum Family {
     /// an optional HTTPRoute backend. Consulted BEFORE the HTTPRoute
     /// fallback for every request path.
     AssetsOnlyApp,
+    /// Transitional: the old plural still holds rows until the migration
+    /// moves them to AssetsOnlyApp instances. Reads into the same map.
+    LegacyPublicAssets,
     /// Typed WafRule CRs (gateway.qreta.io): the gateway's own WAF rules,
     /// watched from kapi and compiled into the live wirefilter ruleset.
     /// The CR set is the dynamic half of the WAF; the TOML `[[waf.rules]]`
@@ -126,6 +129,7 @@ impl Family {
             Self::Kapinodes => "kapinodes",
             Self::Secrets => "secrets",
             Self::AssetsOnlyApp => "assetsonlyapps",
+            Self::LegacyPublicAssets => "publicassets",
             Self::WafRules => "wafrules",
             Self::RateLimits => "ratelimits",
         }
@@ -368,7 +372,7 @@ impl Table {
             Family::Pods => self.pods.clear(),
             Family::Nodes => self.node_rows.clear(),
             Family::Secrets => self.secrets.clear(),
-            Family::AssetsOnlyApp => self.assets_only_apps.clear(),
+            Family::AssetsOnlyApp | Family::LegacyPublicAssets => self.assets_only_apps.clear(),
             Family::WafRules => self.waf_rules.clear(),
             Family::RateLimits => self.rate_limits.clear(),
             Family::Kapinodes => return,
@@ -422,7 +426,7 @@ impl Table {
                 };
                 self.secrets.insert((namespace, name), object.clone());
             }
-            Family::AssetsOnlyApp => {
+            Family::AssetsOnlyApp | Family::LegacyPublicAssets => {
                 let Some((org, name, binding)) = assets_only_app_row(object) else {
                     return;
                 };
@@ -472,7 +476,7 @@ impl Table {
                     self.secrets.remove(&(namespace, name));
                 }
             }
-            Family::AssetsOnlyApp => {
+            Family::AssetsOnlyApp | Family::LegacyPublicAssets => {
                 if let Some((org, name, _)) = assets_only_app_row(object) {
                     self.assets_only_apps.remove(&(org, name));
                 }
