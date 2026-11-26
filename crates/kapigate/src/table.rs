@@ -797,7 +797,9 @@ fn child_pull_token(
 /// are mutually exclusive; an invalid row (both/neither) contributes no
 /// binding — the kapi controller marks it not-ready. The status carries
 /// the resolved public/ paths + hashes + header rules.
-fn assets_only_app_row(object: &serde_json::Value) -> Option<(String, String, AssetsOnlyAppBinding)> {
+fn assets_only_app_row(
+    object: &serde_json::Value,
+) -> Option<(String, String, AssetsOnlyAppBinding)> {
     use kapigate_core::assets_only_app::{AssetsOnlyAppSpec, AssetsOnlyAppStatus};
     let org = object.pointer("/metadata/namespace")?.as_str()?.to_owned();
     let name = object.pointer("/metadata/name")?.as_str()?.to_owned();
@@ -1145,12 +1147,37 @@ mod tests {
             .resolve("orders.example.com", "/", addr_map(), None)
             .unwrap();
         assert_eq!(r.image.as_deref(), Some("ghcr.io/qretaio/orders:sha"));
-        let spec = r.assets.expect("the AssetsOnlyApp spec reaches the gateway");
+        let spec = r
+            .assets
+            .expect("the AssetsOnlyApp spec reaches the gateway");
         assert_eq!(
             spec.hashes.get("index.html").map(String::as_str),
             Some("abc")
         );
         assert!(!spec.run_worker_first);
+        assert!(r.assets_only_apps.is_some());
+    }
+
+    #[test]
+    fn a_sibling_route_does_not_clobber_the_assets_binding() {
+        let mut t = Table::default();
+        let mut fn_route = hr("app-drive-drive.qreta.io", &["drive.qreta.io"]);
+        fn_route["spec"]["rules"][0]["backendRefs"][0]["name"] = json!("app-drive");
+        t.apply(Family::Httproutes, "ADDED", &fn_route);
+        let mut wj_route = hr("drive-drive.qreta.io", &["drive.qreta.io"]);
+        wj_route["spec"]["rules"][0]["backendRefs"][0]["name"] = json!("wisolate");
+        t.apply(Family::Httproutes, "ADDED", &wj_route);
+        t.apply(
+            Family::AssetsOnlyApp,
+            "ADDED",
+            &json!({
+                "metadata": {"name": "app-drive-assets", "namespace": "acme"},
+                "spec": {"oci": "ghcr.io/qretaio/drive:v1", "httpRouteRef": "app-drive-drive.qreta.io"},
+                "status": {"publicPaths": {"index.html": 3}}
+            }),
+        );
+        let (r, _) = t.resolve("drive.qreta.io", "/", addr_map(), None).unwrap();
+        assert_eq!(r.image.as_deref(), Some("ghcr.io/qretaio/drive:v1"));
         assert!(r.assets_only_apps.is_some());
     }
 
