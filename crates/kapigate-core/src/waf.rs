@@ -141,6 +141,16 @@ pub fn has_secret_dir_segment(path: &str) -> bool {
 /// files, and secret directory segments — all at any depth.
 #[must_use]
 pub fn is_private_path(path: &str) -> bool {
+    // `/webauthn/credentials` is a legitimate WebAuthn API endpoint (the
+    // passkey list/delete face), not a leaked credential file. The
+    // segment-based `credentials` deny is meant for paths like
+    // `/.git-credentials` or `/app/credentials` on a static server — a
+    // route whose last segment is exactly `credentials` under a known
+    // API prefix must pass so the gateway does not block it and then
+    // penalize the caller into a 60s loop of 429s on the register flow.
+    if path == "/webauthn/credentials" {
+        return false;
+    }
     is_private_prefix(path) || is_secret_file_path(path) || has_secret_dir_segment(path)
 }
 
@@ -736,6 +746,9 @@ mod tests {
         assert!(!is_private_path("/__privateish/thing"));
         assert!(!is_private_path("/environment")); // not `env.*`
         assert!(!is_private_path("/api/envelope")); // not `env.*`
+        // The WebAuthn credential API is a route, not a leaked file.
+        assert!(!is_private_path("/webauthn/credentials"));
+        assert!(is_private_path("/.git-credentials"));
         let rules = WafRules::compile(&[]).unwrap();
         assert_eq!(
             rules.evaluate(&request("GET", "/api/inbox", "curl/8")),
