@@ -17,6 +17,11 @@ use kapigate_core::ratelimit::RateDecision;
 /// accounting under abuse — the honest trade for a bounded store).
 pub const MAX_TRACKED_KEYS: usize = 65_536;
 
+/// How long a private/admin-path probe penalizes the source IP. Kept short
+/// (10s) so an honest mistyped URL recovers quickly; automated probing is
+/// still expensive because every probe restarts the window.
+pub const PRIVATE_PATH_PENALTY_WINDOW: Duration = Duration::from_secs(10);
+
 struct Entry {
     /// The rule's window hits (allowed requests only).
     hits: Vec<Instant>,
@@ -87,15 +92,16 @@ impl RateLimiter {
     /// scanner that keeps hammering the door only deepens its own penalty.
     /// One hit is enough to flag the IP: [`Self::is_private_path_penalized`]
     /// then refuses its every subsequent request (to any path) until the
-    /// window expires. One minute is enough to make automated probing
-    /// expensive without stranding a human who mistyped a URL.
+    /// window expires. Ten seconds is enough to make automated probing
+    /// expensive without stranding a human who mistyped a URL — a human
+    /// recovers on the next short window instead of waiting a full minute.
     pub fn penalize_private_path(&self, ip: std::net::IpAddr) {
         let bucket = format!("{}{ip}", Self::PRIVATE_PATH_PENALTY_PREFIX);
         // `check` with a generous limit just records the hit and returns
         // None; the penalty is enforced by `is_private_path_penalized`,
         // which reads the recorded hit. Using `check` keeps the store
         // bounded and the hit pruning identical to ordinary rate buckets.
-        let _ = self.check(&bucket, u32::MAX, Duration::from_secs(60));
+        let _ = self.check(&bucket, u32::MAX, PRIVATE_PATH_PENALTY_WINDOW);
     }
 
     /// Whether `ip` is currently over the private-path penalty budget.
@@ -109,7 +115,7 @@ impl RateLimiter {
         let Ok(map) = self.inner.map.lock() else {
             return false; // poisoned lock: fail open (mitigation, not a gate)
         };
-        let window = Duration::from_secs(60);
+        let window = PRIVATE_PATH_PENALTY_WINDOW;
         let now = Instant::now();
         map.get(&bucket)
             .is_some_and(|e| e.hits.iter().any(|t| *t + window > now))
@@ -141,7 +147,7 @@ mod tests {
     use super::*;
 
     fn window() -> Duration {
-        Duration::from_secs(60)
+        PRIVATE_PATH_PENALTY_WINDOW
     }
 
     #[test]

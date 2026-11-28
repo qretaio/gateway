@@ -378,7 +378,10 @@ impl Gateway {
             );
             return Response::builder()
                 .status(429)
-                .header("retry-after", "60")
+                .header(
+                    "retry-after",
+                    crate::rate_state::PRIVATE_PATH_PENALTY_WINDOW.as_secs().to_string(),
+                )
                 .header("x-qreta-rate", "private-path-penalty")
                 .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(Body::from("rate limit exceeded\n"))
