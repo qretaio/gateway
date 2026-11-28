@@ -316,6 +316,22 @@ impl FamilyLoop {
             }
             "ADDED" | "MODIFIED" | "DELETED" => {
                 if let Some(object) = event.get("object") {
+                    // Advance the family's position from EVERY event, not
+                    // just BOOKMARKs: kapi emits one bookmark at watch start
+                    // and then a stream of MODIFIED events whose
+                    // object.metadata.resourceVersion keeps climbing. A
+                    // bookmark-only informer pins itself at the LIST rv
+                    // forever — health reports connected with a frozen
+                    // max_rv, and a re-list/watch restart replays the same
+                    // stale window.
+                    let rv = object
+                        .pointer("/metadata/resourceVersion")
+                        .and_then(rv_string);
+                    self.set_state(|s| {
+                        if let Some(rv) = rv {
+                            s.resource_version = Some(rv);
+                        }
+                    });
                     let mut table = self.inner.table.write().await;
                     table.apply(self.family, event_type, object);
                 }

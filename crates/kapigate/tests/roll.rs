@@ -449,3 +449,82 @@ async fn the_boot_refuses_until_every_family_converges() {
         .expect("the boot's own answer is a bound listener");
     assert_eq!(listener.local_addr().unwrap().port(), port);
 }
+
+/// A kapi mock whose watch emits the leading bookmark (rv 7) and then
+/// one MODIFIED event carrying rv 8 — the shape every real family
+/// stream sends after its start bookmark.
+async fn mock_kapi_advancing() -> std::net::SocketAddr {
+    let app = axum::Router::new().fallback(move |req: Request| async move {
+        let (parts, body) = req.into_parts();
+        let _ = axum::body::to_bytes(body, 1024).await;
+        let query = parts.uri.query().unwrap_or_default().to_owned();
+        if query.contains("watch=true") {
+            let (line_tx, line_rx) = tokio::sync::mpsc::channel::<String>(4);
+            tokio::spawn(async move {
+                let bookmark = json!({"type": "BOOKMARK",
+                    "object": {"metadata": {"resourceVersion": 7}}});
+                let event = json!({"type": "MODIFIED",
+                    "object": {"apiVersion": "v1", "kind": "Pod",
+                        "metadata": {"name": "p", "resourceVersion": 8},
+                        "spec": {}}});
+                let _ = line_tx.send(format!("{bookmark}\n")).await;
+                let _ = line_tx.send(format!("{event}\n")).await;
+                std::future::pending::<()>().await;
+            });
+            let stream = tokio_stream::wrappers::ReceiverStream::new(line_rx);
+            use tokio_stream::StreamExt as _;
+            return Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from_stream(stream.map(Ok::<_, std::convert::Infallible>)))
+                .unwrap();
+        }
+        let body = json!({
+            "apiVersion": "v1", "kind": "List",
+            "metadata": {"resourceVersion": "7"}, "items": [],
+        });
+        Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// The informer's position advances from EVERY watch event, not just the
+/// leading bookmark. A bookmark-only informer pins max_rv at the LIST
+/// value forever — health reports connected with a frozen version and
+/// never observes newer writes.
+#[tokio::test]
+async fn a_modified_event_advances_the_informer_position() {
+    let kapi = mock_kapi_advancing().await;
+    let config = gateway_config(kapi, free_port(), 10);
+    let inf = Arc::new(Informer::new(
+        config.kapi.as_ref().map(|k| k.url.as_str()).unwrap_or(""),
+    ));
+    let (_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let run_inf = Arc::clone(&inf);
+    tokio::spawn(async move { run_inf.run(shutdown_rx).await });
+
+    // Wait for the first family to report rv 8 (the MODIFIED event's
+    // object.metadata.resourceVersion), bounded so a regression fails.
+    let advanced = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if inf.max_rv().is_some_and(|rv| rv >= 8) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        advanced,
+        "a MODIFIED event with rv 8 must advance max_rv past the bookmark's 7, got {:?}",
+        inf.max_rv()
+    );
+}
